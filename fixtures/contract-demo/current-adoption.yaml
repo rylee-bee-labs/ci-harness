@@ -17,7 +17,7 @@ schema: play-nice/adoption-v1
 project: ci-harness-fixture-current
 source:
   repository: rylee-bee-labs/play-nice-contracts
-  revision: 2bbe8f675fea3f9f0ae455b55b84141cd12af3ad   # re-pinned 2026-10-10 with Rylee's OK: play-nice-contracts#65 (README) and #66 (org rename; schema/*.json $id owner only); no contract rule changed.
+  revision: 2969685e38458a65e29bc8f63f3b38a3ab4a4556   # re-pinned 2026-10-11 by the coordinator to clear the red main that play-nice-contracts#67 caused (schema/library.schema.json $id owner string); no contract rule changed.
 freshness:
   policy: require-current
   ref: main
