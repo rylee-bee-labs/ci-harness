@@ -817,9 +817,9 @@ ph_header() { bash "$SELF" project-home-header --env-file "$1"; }
 # consumer must not have to learn a new field.
 ph_body() { # $1 action
   env PH_ACTION="$1" \
-    PH_ACTOR="gha:Rylee-Bee/vefr:7" PH_LEASE_SECONDS=900 \
+    PH_ACTOR="gha:rylee-bee-labs/vefr:7" PH_LEASE_SECONDS=900 \
     PH_OUTCOME="succeeded" PH_NOTE="" \
-    PH_RUN_URL="https://github.com/Rylee-Bee/vefr/actions/runs/7" \
+    PH_RUN_URL="https://github.com/rylee-bee-labs/vefr/actions/runs/7" \
     PH_NOTICE_KEY="self-smoke" PH_NOTICE_CATEGORY="mission" \
     PH_NOTICE_TITLE="ci-harness self-smoke" PH_NOTICE_BODY="request construction only" \
     PH_NOTICE_LINK="" \
@@ -944,7 +944,7 @@ self_test() {
   export OTEL_SERVICE_NAME="ci-harness"
   local ctx="$tmp/ctx.env"
   OTELSPAN_JOB_KEY="reusable-python:test" OTELSPAN_PIPELINE_NAME="self-smoke" \
-    OTELSPAN_RUN_ID="4242" OTELSPAN_RUN_ATTEMPT="1" OTELSPAN_REPOSITORY="Rylee-Bee/ci-harness" \
+    OTELSPAN_RUN_ID="4242" OTELSPAN_RUN_ATTEMPT="1" OTELSPAN_REPOSITORY="rylee-bee-labs/ci-harness" \
     OTELSPAN_REF_HEAD="otel/ci-19" OTELSPAN_HEAD_REVISION="$(printf 'c%.0s' $(seq 40))" \
     OTELSPAN_CHANGE_ID="314" OTELSPAN_RUNNER_LABEL="bazzite" OTELSPAN_READ_GIT=0 \
     bash "$SELF" context --env-file "$ctx" >/dev/null
@@ -1092,7 +1092,7 @@ FAKE_GH
     "the API path is exercised from a directory that is not a git repository — no checkout"
 
   ( cd "$nocheckout" && PATH="$fakebin:$PATH" GITHUB_WORKSPACE="$nocheckout" \
-      GITHUB_REPOSITORY="Rylee-Bee/vefr" GH_TOKEN="ghs_notarealtoken" \
+      GITHUB_REPOSITORY="rylee-bee-labs/vefr" GH_TOKEN="ghs_notarealtoken" \
       GH_FAKE_ARGS="$tmp/gh-args" GH_FAKE_TOKEN="$tmp/gh-token" \
       OTELSPAN_HEAD_REVISION="$api_sha" OTELSPAN_JOB_KEY="reusable-project-home:report" \
       OTELSPAN_PIPELINE_NAME="validate" OTELSPAN_RUN_ID="7" OTELSPAN_RUN_ATTEMPT="1" \
@@ -1112,7 +1112,7 @@ FAKE_GH
     "so the reporter sends Estate-Task: <mission>/<task> with no checkout to read it from"
 
   # The API call is exactly one commit message, and the token is not in argv.
-  assert_eq "api repos/Rylee-Bee/vefr/commits/${api_sha} --jq .commit.message" \
+  assert_eq "api repos/rylee-bee-labs/vefr/commits/${api_sha} --jq .commit.message" \
     "$(cat "$tmp/gh-args" 2>/dev/null)" \
     "the API read is one head commit message, and nothing else"
   assert_eq "ghs_notarealtoken" "$(cat "$tmp/gh-token" 2>/dev/null)" \
@@ -1125,7 +1125,7 @@ FAKE_GH
 
   # The negative cases, because a fallback that guesses would be worse than none.
   ( cd "$nocheckout" && PATH="$fakebin:$PATH" GITHUB_WORKSPACE="$nocheckout" \
-      GITHUB_REPOSITORY="Rylee-Bee/vefr" GH_TOKEN="ghs_notarealtoken" \
+      GITHUB_REPOSITORY="rylee-bee-labs/vefr" GH_TOKEN="ghs_notarealtoken" \
       GH_FAKE_ARGS="$tmp/gh-args2" GH_FAKE_TOKEN="$tmp/gh-token2" GH_FAKE_TRAILER=0 \
       OTELSPAN_HEAD_REVISION="$api_sha" OTELSPAN_RUNNER_LABEL="bazzite" OTELSPAN_READ_GIT=0 \
       bash "$SELF" context --env-file "$tmp/ctx-api-bare.env" >/dev/null )
@@ -1135,7 +1135,7 @@ FAKE_GH
     "an untrailered API read sends no Estate-Task header at all"
 
   ( cd "$nocheckout" && PATH="$fakebin:$PATH" GITHUB_WORKSPACE="$nocheckout" \
-      GITHUB_REPOSITORY="Rylee-Bee/vefr" \
+      GITHUB_REPOSITORY="rylee-bee-labs/vefr" \
       GH_FAKE_ARGS="$tmp/gh-args3" GH_FAKE_TOKEN="$tmp/gh-token3" \
       OTELSPAN_HEAD_REVISION="$api_sha" OTELSPAN_RUNNER_LABEL="bazzite" OTELSPAN_READ_GIT=0 \
       bash "$SELF" context --env-file "$tmp/ctx-api-notoken.env" >/dev/null )
@@ -1146,7 +1146,7 @@ FAKE_GH
   fi
 
   ( cd "$nocheckout" && PATH="$fakebin:$PATH" GITHUB_WORKSPACE="$nocheckout" \
-      GITHUB_REPOSITORY="Rylee-Bee/vefr" GH_TOKEN="ghs_notarealtoken" \
+      GITHUB_REPOSITORY="rylee-bee-labs/vefr" GH_TOKEN="ghs_notarealtoken" \
       GH_FAKE_ARGS="$tmp/gh-args4" GH_FAKE_TOKEN="$tmp/gh-token4" GH_FAKE_FAIL=1 \
       OTELSPAN_HEAD_REVISION="$api_sha" OTELSPAN_RUNNER_LABEL="bazzite" OTELSPAN_READ_GIT=0 \
       bash "$SELF" context --env-file "$tmp/ctx-api-fail.env" >/dev/null )
@@ -1154,7 +1154,7 @@ FAKE_GH
 
   # A sha is interpolated into a URL path, so only hex is ever allowed there.
   ( cd "$nocheckout" && PATH="$fakebin:$PATH" GITHUB_WORKSPACE="$nocheckout" \
-      GITHUB_REPOSITORY="Rylee-Bee/vefr" GH_TOKEN="ghs_notarealtoken" \
+      GITHUB_REPOSITORY="rylee-bee-labs/vefr" GH_TOKEN="ghs_notarealtoken" \
       GH_FAKE_ARGS="$tmp/gh-args5" GH_FAKE_TOKEN="$tmp/gh-token5" \
       OTELSPAN_HEAD_REVISION="main" OTELSPAN_RUNNER_LABEL="bazzite" OTELSPAN_READ_GIT=0 \
       bash "$SELF" context --env-file "$tmp/ctx-api-badsha.env" >/dev/null )
@@ -1169,7 +1169,7 @@ FAKE_GH
   # and the API must not be asked the same question a second time.
   rm -f "$tmp/gh-args6"
   ( cd "$repo" && PATH="$fakebin:$PATH" GITHUB_WORKSPACE="$repo" \
-      GITHUB_REPOSITORY="Rylee-Bee/vefr" GH_TOKEN="ghs_notarealtoken" \
+      GITHUB_REPOSITORY="rylee-bee-labs/vefr" GH_TOKEN="ghs_notarealtoken" \
       GH_FAKE_ARGS="$tmp/gh-args6" GH_FAKE_TOKEN="$tmp/gh-token6" \
       OTELSPAN_HEAD_REVISION="$api_sha" OTELSPAN_RUNNER_LABEL="bazzite" \
       bash "$SELF" context --env-file "$tmp/ctx-git-wins.env" >/dev/null )
@@ -1187,7 +1187,7 @@ FAKE_GH
     "the reporter passes the job token to the context step, for that one API read"
 
   OTELSPAN_JOB_KEY="reusable-node:build" OTELSPAN_PIPELINE_NAME="validate" OTELSPAN_RUN_ID="7" \
-    OTELSPAN_RUN_ATTEMPT="1" OTELSPAN_REPOSITORY="Rylee-Bee/vefr" OTELSPAN_REF_HEAD="314/merge" \
+    OTELSPAN_RUN_ATTEMPT="1" OTELSPAN_REPOSITORY="rylee-bee-labs/vefr" OTELSPAN_REF_HEAD="314/merge" \
     OTELSPAN_CHANGE_ID="314" OTELSPAN_RUNNER_LABEL="ubuntu-latest" \
     bash "$SELF" context --env-file "$tmp/ctx-git.env" --task "m9/T7" >/dev/null
   local g; g=$(grep '^otel_trace_id=' "$tmp/ctx-git.env" | cut -d= -f2- | tr -d "'")
@@ -1201,7 +1201,7 @@ FAKE_GH
   # claim about the environment instead of about the code.
   unset OTELSPAN_TASK
   ( cd "$repo" && OTELSPAN_JOB_KEY="reusable-node:build" OTELSPAN_PIPELINE_NAME="validate" \
-      OTELSPAN_RUN_ID="7" OTELSPAN_RUN_ATTEMPT="1" OTELSPAN_REPOSITORY="Rylee-Bee/vefr" \
+      OTELSPAN_RUN_ID="7" OTELSPAN_RUN_ATTEMPT="1" OTELSPAN_REPOSITORY="rylee-bee-labs/vefr" \
       OTELSPAN_CHANGE_ID="314" OTELSPAN_RUNNER_LABEL="ubuntu-latest" \
       bash "$SELF" context --env-file "$tmp/ctx-untrailered.env" >/dev/null )
   assert_eq "2" "$(grep -cE "^otel_(mission|task)_id=''$" "$tmp/ctx-untrailered.env")" \

@@ -5,7 +5,7 @@
 schema: play-nice/adoption-v1
 project: ci-harness-fixture-current
 source:
-  repository: Rylee-Bee/play-nice-contracts
+  repository: rylee-bee-labs/play-nice-contracts
   revision: "@PIN@"
 always:
   - assume-unknown

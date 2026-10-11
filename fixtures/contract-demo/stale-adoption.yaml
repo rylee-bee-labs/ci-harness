@@ -12,7 +12,7 @@
 schema: play-nice/adoption-v1
 project: ci-harness-contract-demo-stale-probe
 source:
-  repository: Rylee-Bee/play-nice-contracts
+  repository: rylee-bee-labs/play-nice-contracts
   revision: a0e3efbee315aeaa16910818e234bff3853417a6   # stale by design
 freshness:
   policy: require-current
