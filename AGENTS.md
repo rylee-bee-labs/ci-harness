@@ -40,9 +40,11 @@ Lockfiles (`fixtures/*/uv.lock`, `package-lock.json`) are committed on purpose s
 There is no local build, test runner, or lint wrapper, and `actionlint` is not installed on
 the workstation. **CI is the gate**, on every push to `main` and every PR:
 
-- `actionlint-selfcheck` — `./actionlint -color` over `.github/workflows/*.yml`
+- `actionlint-selfcheck` — `./actionlint -color` over `.github/workflows/*.yml`, then `tests/test_workflow_contracts.py` (preflight first in every job, python timeouts/junit summary, PR-scoped secret scan with full scans kept)
 - `self-smoke` — calls each template through its real `uses:` contract
 - `secret-scan-selfcheck` — gitleaks: PR commits only on a PR; full history on push to main and on the weekly schedule
+
+Local, no tools needed: `python3 -m unittest tests.test_workflow_contracts`.
 
 Optional local sanity for a fixture (same invocations the templates run):
 

@@ -44,3 +44,5 @@ jobs:
         # Bare invocation = actionlint's own default glob over
         # .github/workflows/*.yml; passing "." is a directory, not a pattern.
         run: ./actionlint -color
+      - name: Template contracts (preflight, timeouts, junit summary, PR-scoped secret scan)
+        run: python3 -I -m unittest discover -s tests -p 'test_workflow_contracts.py' -v
