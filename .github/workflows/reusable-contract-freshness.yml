@@ -90,6 +90,24 @@ jobs:
       exit-code: ${{ steps.check.outputs.exit-code }}
       status: ${{ steps.check.outputs.status }}
     steps:
+      # Preflight: fail in one plain line, before any real work, when the runner's scratch or
+      # workspace is not writable by this job's uid (self-hosted leftovers from a root-owned
+      # container job are the usual cause). Then drop this harness's own scratch files from a
+      # previous job on the same runner; RUNNER_TEMP's runner-owned entries are never touched.
+      - name: Preflight (workspace and scratch writable)
+        shell: bash
+        run: |
+          for d in "$RUNNER_TEMP" "$GITHUB_WORKSPACE"; do
+            if [ ! -d "$d" ] || [ ! -w "$d" ] || ! probe=$(mktemp "$d/.preflight.XXXXXX" 2>/dev/null); then
+              echo "::error::preflight: $d is not writable by uid $(id -u) ($(id -un)); owner is $(stat -c '%U:%G' "$d" 2>/dev/null || echo missing)"
+              exit 1
+            fi
+            rm -f "$probe"
+          done
+          cd "$RUNNER_TEMP"
+          rm -rf otel-span.sh otel-ctx.env pytest-junit.xml gitleaks gitleaks_*.tar.gz \
+            conftest conftest.tar.gz bin bad.out good.out claim.json play-nice-contracts \
+            freshness.json project-home-estate-task project-home-request.json project-home-response.json
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
