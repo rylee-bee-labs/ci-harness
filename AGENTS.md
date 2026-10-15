@@ -24,7 +24,7 @@ Estate rules: `~/.agents/AGENTS.md` and `play-nice-contracts/contracts/everyone/
 | `.github/workflows/reusable-*.yml` | source | the eight templates consumers call via `uses:` (python, node, container-smoke, contract-freshness, uat, secret-scan, project-home, claims-policy) | yes, when changing a template |
 | `.github/workflows/self-smoke.yml` | source | **real execution** of every template against `fixtures/` | yes, with any template change |
 | `.github/workflows/actionlint-selfcheck.yml` | source | static lint of all workflows with checksum-pinned actionlint | rarely |
-| `.github/workflows/secret-scan-selfcheck.yml` | source | runs `reusable-secret-scan.yml` on this repo (full history) | rarely |
+| `.github/workflows/secret-scan-selfcheck.yml` | source | runs `reusable-secret-scan.yml` on this repo: PR commits only on `pull_request`, full history on push to main and weekly | rarely |
 | `pins/ACTIONS.md` | docs/contract | every pinned action SHA, binary sha256, toolchain default, and the bump protocol | yes, before touching any `uses:` SHA or version default |
 | `README.md` | docs | the human-first front door: what it is, "Is it running?" (one state line + `gh run list -R rylee-bee-labs/ci-harness`), "How to use it", "Where to read more". Hard cap: under 400 words | rarely; it points at this file, not the reverse |
 | `policy/claims.rego`, `policy/claims_test.rego`, `scripts/verify-claim.sh`, `tests/test_claim_policy_drift.py` | source | **canonical** honest-claims policy: the conftest policy, its bash mirror for commit-time hooks, and the drift test that proves the two agree. `reusable-claims-policy.yml` serves these to consumers at their pinned revision; homelab predates the template and keeps its own copies, checked by the same drift test |
@@ -42,7 +42,7 @@ the workstation. **CI is the gate**, on every push to `main` and every PR:
 
 - `actionlint-selfcheck` — `./actionlint -color` over `.github/workflows/*.yml`
 - `self-smoke` — calls each template through its real `uses:` contract
-- `secret-scan-selfcheck` — gitleaks over full history
+- `secret-scan-selfcheck` — gitleaks: PR commits only on a PR; full history on push to main and on the weekly schedule
 
 Optional local sanity for a fixture (same invocations the templates run):
 
@@ -58,14 +58,24 @@ caps at four sections and under 400 words.
 
 | Workflow | Shape |
 |---|---|
-| `reusable-python.yml` | uv + `uv sync --frozen` + repo-given pytest args, optional repo gates after pytest, optional ruff/bandit jobs |
+| `reusable-python.yml` | uv + `uv sync --frozen` + repo-given pytest args (junit-xml artifact, failing tests + short tracebacks in the job summary, `timeout-minutes` input default 30 on every job), optional repo gates after pytest, optional ruff/bandit jobs |
 | `reusable-node.yml` | setup-node + `npm ci` + optional build/lint/test + dist artifact upload; optional Python/uv bootstrap for polyglot e2e (Playwright on a uvicorn app) |
 | `reusable-container-smoke.yml` | docker build + detached run + configurable healthz curl retry loop, with container logs on failure |
 | `reusable-contract-freshness.yml` | shallow-clone the Play-Nice contract source over https, run `contractctl freshness --manifest <caller manifest> --json`; exit 0 only on CURRENT (fail closed) |
 | `reusable-uat.yml` | pinned checkout + setup-node (npm cache, conditional `npm ci`) + a caller-supplied real-browser UAT command under a `UAT_READONLY=1` read-only posture with optional `uat-token` passthrough; UAT output uploaded as an artifact (14-day retention) |
-| `reusable-secret-scan.yml` | pinned checkout + the gitleaks CLI (pinned version and sha256; the action needs a paid key for org repos); a repo-local `.gitleaks.toml` allowlists documented false positives instead of suppressing at the harness level. `fetch-depth` defaults to 1 (fast PR check); use 0 for a full-history scan |
+| `reusable-secret-scan.yml` | pinned checkout + the gitleaks CLI (pinned version and sha256; the action needs a paid key for org repos); a repo-local `.gitleaks.toml` allowlists documented false positives instead of suppressing at the harness level. on `pull_request` it scans only the commits the PR adds (`--log-opts base..head`, full fetch forced, fail closed if the range cannot be resolved); on any other event it scans what `fetch-depth` fetched (use 0 for full history) |
 | `reusable-claims-policy.yml` | fetch the canonical honest-claims policy from this repo **at the revision the caller pinned** (`github.workflow_ref`), install conftest, run a canary that proves the policy fires, then gate the PR body or commit message. `mirror-path` additionally proves a repo's vendored bash mirror agrees with the policy. Fail closed on an unreadable body |
 | `reusable-project-home.yml` | narrow Project Home CI reporter: exact task claim/heartbeat/finish plus deduplicated BOOP notice; callers pass the private base URL and a dedicated `ci`-scope token only as secrets |
+
+### Secret scan scope (decided 2026-10-15)
+
+PRs fail only on **new** findings: `reusable-secret-scan.yml` scans `base..head` when the
+caller's event is `pull_request`, so an old finding on main cannot block an unrelated PR.
+The full scan is never weakened: callers must also run it (`fetch-depth: 0`) on `push` to
+main and on a `schedule`, as `secret-scan-selfcheck.yml` does. No baseline file is used;
+a documented false positive belongs in the repo's `.gitleaks.toml` allowlist, which is
+reviewed like any other diff. Dropping the push/schedule triggers from a caller leaves
+old history unscanned: do not.
 
 Adoption is a ~15-line contract replacing hundreds of lines of copy-pasted plumbing,
 keeping the repo's real check arguments. The SHA is obtained with
