@@ -120,6 +120,8 @@ jobs:
       # previous job on the same runner; RUNNER_TEMP's runner-owned entries are never touched.
       - name: Preflight (workspace and scratch writable)
         shell: bash
+        # Runs before checkout, so the job's default working-directory may not exist yet.
+        working-directory: ${{ runner.temp }}
         run: |
           for d in "$RUNNER_TEMP" "$GITHUB_WORKSPACE"; do
             if [ ! -d "$d" ] || [ ! -w "$d" ] || ! probe=$(mktemp "$d/.preflight.XXXXXX" 2>/dev/null); then
