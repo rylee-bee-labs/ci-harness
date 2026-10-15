@@ -43,6 +43,20 @@ class PreflightTest(unittest.TestCase):
             self.assertIn("owner is", text, path.name)
 
 
+
+    def test_every_job_in_every_template_has_timeout(self) -> None:
+        for path in TEMPLATES:
+            text = path.read_text()
+            jobs = len(re.findall(r"^    runs-on:", text, re.M))
+            self.assertGreater(jobs, 0, path.name)
+            self.assertEqual(
+                text.count("    timeout-minutes: ${{ inputs.timeout-minutes }}\n"), jobs, path.name
+            )
+
+    def test_scratch_reset_names_only_harness_files(self) -> None:
+        # RUNNER_TEMP is shared with the runner; never wipe a whole directory like bin/.
+        for path in TEMPLATES:
+            self.assertNotRegex(path.read_text(), r"conftest\.tar\.gz bin ", path.name)
 class PythonTemplateTest(unittest.TestCase):
     text = read("reusable-python.yml")
 

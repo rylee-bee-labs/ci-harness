@@ -23,6 +23,13 @@ name: reusable-node
 on:
   workflow_call:
     inputs:
+      timeout-minutes:
+        description: >-
+          Timeout for every job in this workflow, in minutes. A hung job otherwise holds a
+          runner for GitHub's 360-minute default.
+        type: number
+        required: false
+        default: 30
       runs-on:
         description: >-
           Runner label for every job (default GitHub-hosted ubuntu-latest). Private repos pass
@@ -108,6 +115,7 @@ jobs:
   build:
     name: node build
     runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
     defaults:
       run:
         working-directory: ${{ inputs.working-directory }}
@@ -130,7 +138,7 @@ jobs:
           done
           cd "$RUNNER_TEMP"
           rm -rf otel-span.sh otel-ctx.env pytest-junit.xml gitleaks gitleaks_*.tar.gz \
-            conftest conftest.tar.gz bin bad.out good.out claim.json play-nice-contracts \
+            conftest conftest.tar.gz bin/conftest bad.out good.out claim.json play-nice-contracts \
             freshness.json project-home-estate-task project-home-request.json project-home-response.json
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
