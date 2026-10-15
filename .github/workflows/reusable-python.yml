@@ -69,6 +69,20 @@ on:
         type: number
         required: false
         default: 0
+      timeout-minutes:
+        description: >-
+          Timeout for every job in this workflow (test, ruff, bandit), in minutes. A hung
+          job otherwise holds a runner for GitHub's 360-minute default.
+        type: number
+        required: false
+        default: 30
+      junit-artifact-name:
+        description: >-
+          Name of the uploaded pytest junit-xml artifact. Artifact names must be unique per
+          workflow run: override when calling this template more than once from one caller.
+        type: string
+        required: false
+        default: pytest-junit
       post-test-commands:
         description: >-
           Shell lines to run in the synced environment after pytest passes,
@@ -109,10 +123,31 @@ jobs:
   test:
     name: python tests
     runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
     defaults:
       run:
         working-directory: ${{ inputs.project-directory }}
     steps:
+      # Preflight: fail in one plain line, before any real work, when the runner's scratch or
+      # workspace is not writable by this job's uid (self-hosted leftovers from a root-owned
+      # container job are the usual cause). Then drop this harness's own scratch files from a
+      # previous job on the same runner; RUNNER_TEMP's runner-owned entries are never touched.
+      - name: Preflight (workspace and scratch writable)
+        shell: bash
+        # Runs before checkout, so the job's default working-directory may not exist yet.
+        working-directory: ${{ runner.temp }}
+        run: |
+          for d in "$RUNNER_TEMP" "$GITHUB_WORKSPACE"; do
+            if [ ! -d "$d" ] || [ ! -w "$d" ] || ! probe=$(mktemp "$d/.preflight.XXXXXX" 2>/dev/null); then
+              echo "::error::preflight: $d is not writable by uid $(id -u) ($(id -un)); owner is $(stat -c '%U:%G' "$d" 2>/dev/null || echo missing)"
+              exit 1
+            fi
+            rm -f "$probe"
+          done
+          cd "$RUNNER_TEMP"
+          rm -rf otel-span.sh otel-ctx.env pytest-junit.xml gitleaks gitleaks_*.tar.gz \
+            conftest conftest.tar.gz bin/conftest bad.out good.out claim.json play-nice-contracts \
+            freshness.json project-home-estate-task project-home-request.json project-home-response.json
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -166,19 +201,74 @@ jobs:
         run: pip install uv==${{ inputs.uv-version }}
       - name: Sync locked dependencies
         run: uv sync --frozen ${{ inputs.sync-args }}
+      # junit-xml goes to RUNNER_TEMP (outside the workspace, so it cannot be committed or
+      # picked up by a repo's own globbing); the next two steps read it even when pytest failed.
       - name: Run pytest
         env:
           PYTEST_WORKERS: ${{ inputs.pytest-workers }}
+          JUNIT_XML: ${{ runner.temp }}/pytest-junit.xml
         run: |
           if [ "${PYTEST_WORKERS:-0}" -gt 0 ]; then
             # Into the environment `uv sync --frozen` just built, then run it as synced (--no-sync).
             # `uv run --with` (the first version, ci-harness#42) ran pytest without the project's own
             # dependencies: project-home#188 failed with "No module named 'fastapi'".
             uv pip install --quiet pytest-xdist
-            uv run --no-sync pytest -n "$PYTEST_WORKERS" ${{ inputs.pytest-args }}
+            uv run --no-sync pytest -n "$PYTEST_WORKERS" --junit-xml="$JUNIT_XML" ${{ inputs.pytest-args }}
           else
-            uv run pytest ${{ inputs.pytest-args }}
+            uv run pytest --junit-xml="$JUNIT_XML" ${{ inputs.pytest-args }}
           fi
+      # Failing test names and short tracebacks only, written to the job summary so a red run
+      # is readable without opening the raw log. Passing tests are never listed.
+      - name: Pytest failures to job summary
+        if: ${{ always() }}
+        continue-on-error: true
+        shell: bash
+        env:
+          JUNIT_XML: ${{ runner.temp }}/pytest-junit.xml
+        run: |
+          if [ ! -s "$JUNIT_XML" ]; then
+            echo "### pytest: no test report was written (pytest did not start, or failed during collection); read the pytest step log" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          python3 - "$JUNIT_XML" >> "$GITHUB_STEP_SUMMARY" <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+
+          MAX_TESTS, MAX_LINES = 20, 12
+          root = ET.parse(sys.argv[1]).getroot()
+          suites = [root] if root.tag == "testsuite" else list(root.iter("testsuite"))
+          totals = {k: sum(int(s.get(k, 0)) for s in suites) for k in ("tests", "failures", "errors", "skipped")}
+          bad = []
+          for case in root.iter("testcase"):
+              for kind in ("failure", "error"):
+                  node = case.find(kind)
+                  if node is not None:
+                      name = f"{case.get('classname', '')}::{case.get('name', '')}".strip(":")
+                      # pytest puts the traceback in the element text; other writers put it
+                      # in the message attribute. Keep both, message first.
+                      parts = [node.get("message") or "", node.text or ""]
+                      text = "\n".join(p.strip() for p in parts if p.strip()).splitlines()
+                      bad.append((kind, name, text))
+          if not bad:
+              print(f"### pytest: {totals['tests']} tests, no failures")
+              sys.exit(0)
+          print(f"### pytest: {len(bad)} failing of {totals['tests']} tests ({totals['skipped']} skipped)")
+          for kind, name, text in bad[:MAX_TESTS]:
+              tail = text[-MAX_LINES:]
+              print(f"\n**{kind}** `{name}`\n\n```")
+              print("\n".join(tail))
+              print("```")
+          if len(bad) > MAX_TESTS:
+              print(f"\n... {len(bad) - MAX_TESTS} more failing tests; see the pytest-junit artifact")
+          PY
+      - name: Upload pytest junit-xml
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ inputs.junit-artifact-name }}
+          path: ${{ runner.temp }}/pytest-junit.xml
+          if-no-files-found: ignore
+          retention-days: 14
       - name: Repo-owned post-test gates
         if: ${{ inputs.post-test-commands != '' }}
         run: |
@@ -207,10 +297,31 @@ jobs:
     name: ruff
     if: ${{ inputs.enable-ruff }}
     runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
     defaults:
       run:
         working-directory: ${{ inputs.project-directory }}
     steps:
+      # Preflight: fail in one plain line, before any real work, when the runner's scratch or
+      # workspace is not writable by this job's uid (self-hosted leftovers from a root-owned
+      # container job are the usual cause). Then drop this harness's own scratch files from a
+      # previous job on the same runner; RUNNER_TEMP's runner-owned entries are never touched.
+      - name: Preflight (workspace and scratch writable)
+        shell: bash
+        # Runs before checkout, so the job's default working-directory may not exist yet.
+        working-directory: ${{ runner.temp }}
+        run: |
+          for d in "$RUNNER_TEMP" "$GITHUB_WORKSPACE"; do
+            if [ ! -d "$d" ] || [ ! -w "$d" ] || ! probe=$(mktemp "$d/.preflight.XXXXXX" 2>/dev/null); then
+              echo "::error::preflight: $d is not writable by uid $(id -u) ($(id -un)); owner is $(stat -c '%U:%G' "$d" 2>/dev/null || echo missing)"
+              exit 1
+            fi
+            rm -f "$probe"
+          done
+          cd "$RUNNER_TEMP"
+          rm -rf otel-span.sh otel-ctx.env pytest-junit.xml gitleaks gitleaks_*.tar.gz \
+            conftest conftest.tar.gz bin/conftest bad.out good.out claim.json play-nice-contracts \
+            freshness.json project-home-estate-task project-home-request.json project-home-response.json
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -289,10 +400,31 @@ jobs:
     name: bandit
     if: ${{ inputs.enable-bandit }}
     runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
     defaults:
       run:
         working-directory: ${{ inputs.project-directory }}
     steps:
+      # Preflight: fail in one plain line, before any real work, when the runner's scratch or
+      # workspace is not writable by this job's uid (self-hosted leftovers from a root-owned
+      # container job are the usual cause). Then drop this harness's own scratch files from a
+      # previous job on the same runner; RUNNER_TEMP's runner-owned entries are never touched.
+      - name: Preflight (workspace and scratch writable)
+        shell: bash
+        # Runs before checkout, so the job's default working-directory may not exist yet.
+        working-directory: ${{ runner.temp }}
+        run: |
+          for d in "$RUNNER_TEMP" "$GITHUB_WORKSPACE"; do
+            if [ ! -d "$d" ] || [ ! -w "$d" ] || ! probe=$(mktemp "$d/.preflight.XXXXXX" 2>/dev/null); then
+              echo "::error::preflight: $d is not writable by uid $(id -u) ($(id -un)); owner is $(stat -c '%U:%G' "$d" 2>/dev/null || echo missing)"
+              exit 1
+            fi
+            rm -f "$probe"
+          done
+          cd "$RUNNER_TEMP"
+          rm -rf otel-span.sh otel-ctx.env pytest-junit.xml gitleaks gitleaks_*.tar.gz \
+            conftest conftest.tar.gz bin/conftest bad.out good.out claim.json play-nice-contracts \
+            freshness.json project-home-estate-task project-home-request.json project-home-response.json
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
