@@ -226,7 +226,10 @@ jobs:
         env:
           JUNIT_XML: ${{ runner.temp }}/pytest-junit.xml
         run: |
-          [ -s "$JUNIT_XML" ] || exit 0
+          if [ ! -s "$JUNIT_XML" ]; then
+            echo "### pytest: no test report was written (pytest did not start, or failed during collection); read the pytest step log" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           python3 - "$JUNIT_XML" >> "$GITHUB_STEP_SUMMARY" <<'PY'
           import sys
           import xml.etree.ElementTree as ET
@@ -241,7 +244,10 @@ jobs:
                   node = case.find(kind)
                   if node is not None:
                       name = f"{case.get('classname', '')}::{case.get('name', '')}".strip(":")
-                      text = (node.text or node.get("message") or "").strip().splitlines()
+                      # pytest puts the traceback in the element text; other writers put it
+                      # in the message attribute. Keep both, message first.
+                      parts = [node.get("message") or "", node.text or ""]
+                      text = "\n".join(p.strip() for p in parts if p.strip()).splitlines()
                       bad.append((kind, name, text))
           if not bad:
               print(f"### pytest: {totals['tests']} tests, no failures")
