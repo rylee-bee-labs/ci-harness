@@ -65,7 +65,7 @@ caps at four sections and under 400 words.
 | `reusable-container-smoke.yml` | docker build + detached run + configurable healthz curl retry loop, with container logs on failure |
 | `reusable-contract-freshness.yml` | shallow-clone the Play-Nice contract source over https, run `contractctl freshness --manifest <caller manifest> --json`; exit 0 only on CURRENT (fail closed) |
 | `reusable-uat.yml` | pinned checkout + setup-node (npm cache, conditional `npm ci`) + a caller-supplied real-browser UAT command under a `UAT_READONLY=1` read-only posture with optional `uat-token` passthrough; UAT output uploaded as an artifact (14-day retention) |
-| `reusable-secret-scan.yml` | pinned checkout + the gitleaks CLI (pinned version and sha256; the action needs a paid key for org repos); a repo-local `.gitleaks.toml` allowlists documented false positives instead of suppressing at the harness level. on `pull_request` it scans only the commits the PR adds (`--log-opts base..head`, full fetch forced, fail closed if the range cannot be resolved); on any other event it scans what `fetch-depth` fetched (use 0 for full history) |
+| `reusable-secret-scan.yml` | pinned checkout + the gitleaks CLI (pinned version and sha256; the action needs a paid key for org repos); a repo-local `.gitleaks.toml` allowlists documented false positives instead of suppressing at the harness level. on `pull_request` it scans only the commits the PR adds (`--log-opts base..head`, full fetch forced, fail closed if the range cannot be resolved); on any other event it scans what `fetch-depth` fetched (default 0 = full history) |
 | `reusable-claims-policy.yml` | fetch the canonical honest-claims policy from this repo **at the revision the caller pinned** (`github.workflow_ref`), install conftest, run a canary that proves the policy fires, then gate the PR body or commit message. `mirror-path` additionally proves a repo's vendored bash mirror agrees with the policy. Fail closed on an unreadable body |
 | `reusable-project-home.yml` | narrow Project Home CI reporter: exact task claim/heartbeat/finish plus deduplicated BOOP notice; callers pass the private base URL and a dedicated `ci`-scope token only as secrets |
 
@@ -73,8 +73,9 @@ caps at four sections and under 400 words.
 
 PRs fail only on **new** findings: `reusable-secret-scan.yml` scans `base..head` when the
 caller's event is `pull_request`, so an old finding on main cannot block an unrelated PR.
-The full scan is never weakened: callers must also run it (`fetch-depth: 0`) on `push` to
-main and on a `schedule`, as `secret-scan-selfcheck.yml` does. No baseline file is used;
+The full scan is never weakened: `fetch-depth` defaults to 0 (full history) for every
+non-PR event, and callers must keep `push` to main and a `schedule` trigger, as
+`secret-scan-selfcheck.yml` does. No baseline file is used;
 a documented false positive belongs in the repo's `.gitleaks.toml` allowlist, which is
 reviewed like any other diff. Dropping the push/schedule triggers from a caller leaves
 old history unscanned: do not.

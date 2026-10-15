@@ -87,8 +87,13 @@ class SecretScanTest(unittest.TestCase):
     def test_pr_scans_only_its_range(self) -> None:
         self.assertIn('--log-opts="${PR_BASE_SHA}..${PR_HEAD_SHA}"', self.text)
         self.assertIn('[ "$EVENT_NAME" = "pull_request" ]', self.text)
-        self.assertIn("github.event_name == 'pull_request' && 0 || inputs.fetch-depth", self.text)
+        self.assertIn("github.event_name == 'pull_request' && '0' || inputs.fetch-depth", self.text)
         self.assertIn("exit 2", self.text)  # unresolvable range fails closed
+
+    def test_non_pr_default_is_full_history(self) -> None:
+        # Consumers that pass nothing still get a full-history scan on push and schedule.
+        block = self.text.split("fetch-depth:", 1)[1].split("jobs:", 1)[0]
+        self.assertIn("default: 0", block)
 
     def test_full_scan_not_weakened(self) -> None:
         # Exactly one gitleaks invocation, and it scans the fetched history unless scoped above.
