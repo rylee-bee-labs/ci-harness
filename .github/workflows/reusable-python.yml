@@ -64,11 +64,17 @@ on:
         description: >-
           Parallel pytest workers (pytest-xdist, installed into the synced
           environment for this run only, so no repo lockfile changes). 0 = serial, the
-          default. Opt in per repo only after its suite has passed in parallel
-          (2026-10-10: agent-platform 633 s -> 173 s on 6 workers, all green).
-        type: number
+          default. A number pins the count. `auto` sizes it per job:
+          max(1, min(cap_cores, 8) // max(1, busy_jobs)), where cap_cores is the cgroup CPU cap
+          (/sys/fs/cgroup/cpu.max quota/period, nproc when it says "max" or is absent) and
+          busy_jobs counts the pytest runs currently holding a lock file under
+          runner.tool_cache/busy-jobs (this job included), so four overlapping jobs on a
+          6-CPU cap get 1 worker each and a lone job gets 6. Hosted runners: nproc. Opt in per
+          repo only after its suite has passed in parallel (2026-10-10: agent-platform
+          633 s -> 173 s on 6 workers, all green). Type is string: quote numbers in the caller.
+        type: string
         required: false
-        default: 0
+        default: "0"
       pytest-select:
         description: >-
           all (default) runs the whole suite. affected, on pull_request only, runs just the tests
@@ -281,7 +287,50 @@ jobs:
         env:
           PYTEST_WORKERS: ${{ inputs.pytest-workers }}
           JUNIT_XML: ${{ runner.temp }}/pytest-junit.xml
+          TOOL_CACHE: ${{ runner.tool_cache }}
+          LOCK_MAX_AGE_MIN: ${{ inputs.timeout-minutes }}
         run: |
+          # Right-size workers. Self-hosted: join the busy-jobs lock dir for the life of this step
+          # (the trap leaves it on any exit; locks older than the job timeout are leftovers from a
+          # killed runner and are pruned). Count includes this job.
+          CPU_MAX_FILE="${CPU_MAX_FILE:-/sys/fs/cgroup/cpu.max}"
+          resolve_workers() {
+            case "$PYTEST_WORKERS" in
+              auto) ;;
+              ''|*[!0-9]*) echo "::error::pytest-workers must be a number or 'auto', got '$PYTEST_WORKERS'"; exit 1 ;;
+              *) return 0 ;;
+            esac
+            local cap quota period busy=1
+            cap=$(nproc)
+            if [ -r "$CPU_MAX_FILE" ]; then
+              read -r quota period < "$CPU_MAX_FILE" || true
+              if [ "${quota:-max}" != max ] && [ "${period:-0}" -gt 0 ]; then cap=$((quota / period)); fi
+            fi
+            [ "$cap" -ge 1 ] || cap=1
+            if [ "${RUNNER_ENVIRONMENT:-}" = self-hosted ]; then
+              busy=$(find "$LOCK_DIR" -maxdepth 1 -type f | wc -l)
+              [ "$busy" -ge 1 ] || busy=1
+              eff=$(( cap < 8 ? cap : 8 ))
+              PYTEST_WORKERS=$(( eff / busy ))
+            else
+              # Hosted runners are not shared between jobs: every core is ours.
+              busy=1
+              cap=$(nproc)
+              PYTEST_WORKERS=$cap
+            fi
+            [ "$PYTEST_WORKERS" -ge 1 ] || PYTEST_WORKERS=1
+            echo "pytest workers: auto -> $PYTEST_WORKERS (cap_cores=$cap, busy_jobs=$busy)"
+            printf 'pytest workers: auto -> %s (cap_cores=%s, busy_jobs=%s)\n\n' "$PYTEST_WORKERS" "$cap" "$busy" >> "$GITHUB_STEP_SUMMARY"
+          }
+          if [ "${RUNNER_ENVIRONMENT:-}" = self-hosted ]; then
+            LOCK_DIR="$TOOL_CACHE/busy-jobs"
+            mkdir -p "$LOCK_DIR"
+            find "$LOCK_DIR" -maxdepth 1 -type f -mmin "+${LOCK_MAX_AGE_MIN:-30}" -delete 2>/dev/null || true
+            lock="$LOCK_DIR/${GITHUB_REPOSITORY//\//_}.${GITHUB_RUN_ID:-0}.${GITHUB_JOB:-job}.$$"
+            : > "$lock"
+            trap 'rm -f "$lock"' EXIT
+          fi
+          resolve_workers
           run_full() {
             if [ "${PYTEST_WORKERS:-0}" -gt 0 ]; then
               # Into the environment `uv sync --frozen` just built, then run it as synced (--no-sync).

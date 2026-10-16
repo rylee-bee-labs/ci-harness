@@ -261,6 +261,77 @@ class AffectedRunTest(unittest.TestCase):
         self.assertFalse(publish.exists())
 
 
+class WorkerSizingTest(unittest.TestCase):
+    """`pytest-workers: auto` through the real `Run pytest` step, with a stub uv and a fake cpu.max."""
+
+    script = step_script(read("reusable-python.yml"), "Run pytest")
+    text = read("reusable-python.yml")
+
+    def run_auto(self, cpu_max: str | None, locks: int = 0, hosted: bool = False, workers: str = "auto") -> tuple[str, str, Path]:
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        root = Path(d.name)
+        (root / "bin").mkdir()
+        log, gsum = root / "uv.log", root / "gsum"
+        gsum.write_text("")
+        (root / "bin" / "uv").write_text('#!/bin/bash\necho "$*" >> "%s"\n' % log)
+        (root / "bin" / "nproc").write_text("#!/bin/bash\necho 16\n")
+        for tool in ("uv", "nproc"):
+            (root / "bin" / tool).chmod(0o755)
+        cpu = root / "cpu.max"
+        if cpu_max is not None:
+            cpu.write_text(cpu_max + "\n")
+        tool_cache = root / "tool"
+        (tool_cache / "busy-jobs").mkdir(parents=True)
+        for i in range(locks):  # other jobs already running
+            (tool_cache / "busy-jobs" / f"other.{i}").write_text("")
+        env = {"PATH": f"{root / 'bin'}:/usr/bin:/bin", "GITHUB_STEP_SUMMARY": str(gsum), "JUNIT_XML": str(root / "j.xml"),
+               "PYTEST_WORKERS": workers, "TOOL_CACHE": str(tool_cache), "CPU_MAX_FILE": str(cpu),
+               "GITHUB_REPOSITORY": "o/r", "GITHUB_RUN_ID": "7", "GITHUB_JOB": "test", "LOCK_MAX_AGE_MIN": "30"}
+        if not hosted:
+            env["RUNNER_ENVIRONMENT"] = "self-hosted"
+        self.proc = subprocess.run(["bash", "-e", "-c", self.script.replace("${{ inputs.pytest-args }}", "-q")],
+                                   env=env, capture_output=True, text=True)
+        return log.read_text() if log.exists() else "", gsum.read_text(), tool_cache / "busy-jobs"
+
+    def workers(self, **kw) -> int:
+        log, _, _ = self.run_auto(**kw)
+        self.assertEqual(self.proc.returncode, 0, self.proc.stderr)
+        return int(log.split(" -n ")[1].split()[0])
+
+    def test_formula(self) -> None:
+        self.assertEqual(self.workers(cpu_max="600000 100000"), 6)           # idle: whole cap
+        self.assertEqual(self.workers(cpu_max="600000 100000", locks=1), 3)  # me + 1 other
+        self.assertEqual(self.workers(cpu_max="600000 100000", locks=3), 1)  # 4 jobs: 6 // 4
+        self.assertEqual(self.workers(cpu_max="600000 100000", locks=9), 1)  # never below 1
+        self.assertEqual(self.workers(cpu_max="max 100000"), 8)              # nproc=16, clamped to 8
+        self.assertEqual(self.workers(cpu_max=None), 8)                      # no cpu.max: nproc, clamped
+        self.assertEqual(self.workers(cpu_max="1600000 100000"), 8)
+
+    def test_hosted_uses_nproc(self) -> None:
+        self.assertEqual(self.workers(cpu_max="600000 100000", hosted=True), 16)
+
+    def test_numeric_and_zero_keep_back_compat(self) -> None:
+        self.assertEqual(self.workers(cpu_max="600000 100000", workers="4"), 4)
+        log, _, _ = self.run_auto(cpu_max="600000 100000", workers="0")
+        self.assertNotIn(" -n ", log)
+        self.assertIn("pytest --junit-xml", log)
+
+    def test_job_leaves_the_lock_dir_on_exit_and_summary_names_the_numbers(self) -> None:
+        _, summary, locks = self.run_auto(cpu_max="600000 100000", locks=1)
+        self.assertEqual([p.name for p in locks.iterdir()], ["other.0"])
+        self.assertIn("auto -> 3 (cap_cores=6, busy_jobs=2)", summary)
+
+    def test_garbage_value_fails(self) -> None:
+        self.run_auto(cpu_max="600000 100000", workers="many")
+        self.assertNotEqual(self.proc.returncode, 0)
+
+    def test_default_stays_serial_and_input_documents_formula(self) -> None:
+        block = self.text.split("      pytest-workers:\n", 1)[1].split("      pytest-select:", 1)[0]
+        self.assertIn('default: "0"', block)
+        self.assertIn("max(1, min(cap_cores, 8) // max(1, busy_jobs))", block)
+
+
 class SecretScanTest(unittest.TestCase):
     text = read("reusable-secret-scan.yml")
 

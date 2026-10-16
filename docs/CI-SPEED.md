@@ -27,3 +27,18 @@ Default is `all`.
 - Hosted-runner caching needs `astral-sh/setup-uv` and `actions/cache` pinned by SHA in
   `pins/ACTIONS.md`. The SHAs must be resolved with `git ls-remote` (bump protocol) and could not
   be here (no network), so they are not added. Nothing was guessed.
+
+## pytest-workers: auto
+
+`auto` = `max(1, min(cap_cores, 8) // max(1, busy_jobs))`
+
+- `cap_cores`: `/sys/fs/cgroup/cpu.max` quota / period (`600000 100000` is 6). `max` or a missing
+  file means `nproc`.
+- `busy_jobs`: files in `<runner.tool_cache>/busy-jobs`. The pytest step creates one on start
+  (so the count includes itself) and removes it in an `EXIT` trap; files older than
+  `timeout-minutes` are pruned as leftovers of a killed runner.
+- Hosted runners: `nproc`, no lock dir.
+- 6-CPU cap: 1 job gets 6, 2 get 3, 3 get 2, 4 or more get 1. Jobs that overlap by a few seconds
+  can both count each other and run under-sized; they never over-subscribe.
+- The default is still `0` (serial). The input is now a string; a caller passing a bare number
+  should quote it (`pytest-workers: "6"`).
