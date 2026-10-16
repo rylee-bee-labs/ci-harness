@@ -270,7 +270,7 @@ jobs:
       junit-artifact-name: pytest-junit-affected
 
   # testmon itself, on a fixture repo: record, change one module, only its test is selected; a
-  # change with no covering test selects zero (exit 5, which the template turns into a full run);
+  # change with no covering test selects zero (exit 0 or 5; the template turns it into a full run when Python changed);
   # and xdist + testmon is probed and reported (informational: the template runs testmon serial).
   affected-fixture:
     name: testmon select/fallback on a fixture repo
@@ -302,11 +302,25 @@ jobs:
           echo "after calc.py:  $(ran j1.xml)"
           [ "$(ran j1.xml)" = "test_add" ]
 
-          # Nothing covers this module: testmon selects zero tests and pytest exits 5.
+          # Nothing covers this module: testmon selects zero tests. Depending on the testmon version
+          # that is exit 5 or "no tests ran" with exit 0, so the template counts tests in the junit
+          # file (the same grep as reusable-python) instead of trusting the exit code.
+          count() { grep -o -m1 ' tests="[0-9]*"' "$1" | grep -o '[0-9]*'; }
           echo 'VALUE = 1' > orphan.py
           rc=0; pytest -q --testmon --testmon-forceselect --junit-xml=j2.xml || rc=$?
-          echo "orphan change:  exit $rc"
-          [ "$rc" -eq 5 ]
+          echo "orphan change:  exit $rc, selected $(count j2.xml)"
+          [ "$rc" -eq 0 ] || [ "$rc" -eq 5 ]
+          [ "$(count j2.xml)" -eq 0 ]   # template: Python file changed + zero selected => FULL suite
+
+          # Docs-only change after a clean re-record: also zero selected, which the template accepts
+          # (exit 0 plus a summary line) because no Python file under the project changed.
+          rm orphan.py
+          pytest -q --testmon-noselect --junit-xml=j4.xml
+          echo 'notes' > NOTES.md
+          rc=0; pytest -q --testmon --testmon-forceselect --junit-xml=j5.xml || rc=$?
+          echo "docs change:    exit $rc, selected $(count j5.xml)"
+          [ "$rc" -eq 0 ] || [ "$rc" -eq 5 ]
+          [ "$(count j5.xml)" -eq 0 ]
 
           # Informational: does testmon cooperate with xdist here? The template does not depend on it.
           if pytest -q --testmon-noselect -n 2 --junit-xml=j3.xml >/dev/null 2>&1 && [ "$(ran j3.xml)" = "test_add test_shout" ]; then

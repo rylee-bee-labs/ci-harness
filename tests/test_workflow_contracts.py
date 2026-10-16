@@ -211,7 +211,7 @@ class AffectedRunTest(unittest.TestCase):
 
     script = step_script(read("reusable-python.yml"), "Run pytest")
 
-    def run_step(self, mode: str, rc: int, changed: str = "", workers: str = "0") -> tuple[str, str, Path, Path]:
+    def run_step(self, mode: str, rc: int, changed: str = "", workers: str = "0", tests: int = 3) -> tuple[str, str, Path, Path]:
         d = tempfile.TemporaryDirectory()
         self.addCleanup(d.cleanup)
         root = Path(d.name)
@@ -220,7 +220,9 @@ class AffectedRunTest(unittest.TestCase):
         # Stub: record argv; a testmon run exits `rc` and writes its data file.
         (root / "bin" / "uv").write_text(
             '#!/bin/bash\necho "$*" >> "%s"\n'
-            'case "$*" in *--testmon*) echo db > "$TESTMON_DATAFILE"; exit %d;; esac\nexit 0\n' % (log, rc)
+            'case "$*" in *--testmon*) echo db > "$TESTMON_DATAFILE"\n'
+            '  echo "<testsuites><testsuite name=\\"pytest\\" errors=\\"0\\" tests=\\"%d\\"></testsuite></testsuites>" > "$JUNIT_XML"\n'
+            '  exit %d;; esac\nexit 0\n' % (log, tests, rc)
         )
         (root / "bin" / "uv").chmod(0o755)
         gsum = root / "gsum"
@@ -244,6 +246,23 @@ class AffectedRunTest(unittest.TestCase):
         self.assertEqual(self.proc.returncode, 0)
         self.assertNotIn("pytest --junit-xml", log)  # no full re-run
         self.assertIn("zero tests", summary)
+
+    def test_zero_selected_exit_0_with_changed_files_runs_full(self) -> None:
+        # testmon prints "no tests ran" and exits 0 on some versions (the hosted CI case).
+        log, summary, _, _ = self.run_step("affected", 0, changed="1", tests=0)
+        self.assertEqual(self.proc.returncode, 0, self.proc.stderr)
+        self.assertIn("zero tests", summary)
+        self.assertEqual(log.count("pytest --junit-xml"), 1)
+
+    def test_zero_selected_exit_0_docs_only_is_ok_with_summary(self) -> None:
+        log, summary, _, _ = self.run_step("affected", 0, changed="", tests=0)
+        self.assertEqual(self.proc.returncode, 0, self.proc.stderr)
+        self.assertNotIn("pytest --junit-xml", log)
+        self.assertIn("zero tests", summary)
+
+    def test_selected_tests_do_not_trigger_the_fallback(self) -> None:
+        log, *_ = self.run_step("affected", 0, changed="1", tests=2)
+        self.assertNotIn("pytest --junit-xml", log)
 
     def test_affected_failure_fails_the_step(self) -> None:
         self.run_step("affected", 1, changed="1")

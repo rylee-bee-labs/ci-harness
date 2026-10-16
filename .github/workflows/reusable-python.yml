@@ -365,14 +365,20 @@ jobs:
               uv pip install --quiet "pytest-testmon>=2.1,<3"
               rc=0
               uv run --no-sync pytest --testmon --testmon-forceselect --junit-xml="$JUNIT_XML" ${{ inputs.pytest-args }} || rc=$?
-              if [ "$rc" -eq 5 ] && [ "${PYTEST_CHANGED_UNDER_PROJECT:-}" = 1 ]; then
-                echo "::notice::testmon selected zero tests although files changed under the project; running the full suite"
-                summary "### pytest mode: full (fallback)"$'\n\n'"testmon selected zero tests although files changed under the project, so the full suite ran."
-                run_full
-              elif [ "$rc" -eq 5 ]; then
-                summary "testmon selected zero tests and the PR changed only markdown outside the tests' reach."
-              elif [ "$rc" -ne 0 ]; then
+              # testmon selecting nothing is exit 5 on some versions and exit 0 ("no tests ran") on
+              # others, so count the tests in the junit file instead of trusting the exit code.
+              # An unreadable count is a doubt: it counts as zero. A real failure (rc not 0 or 5) stays one.
+              selected=$(grep -o -m1 ' tests="[0-9]*"' "$JUNIT_XML" 2>/dev/null | grep -o '[0-9]*' || true)
+              if [ "$rc" -ne 0 ] && [ "$rc" -ne 5 ]; then
                 exit "$rc"
+              elif [ "$rc" -eq 5 ] || [ "${selected:-0}" -eq 0 ]; then
+                if [ "${PYTEST_CHANGED_UNDER_PROJECT:-}" = 1 ]; then
+                  echo "::notice::testmon selected zero tests although files changed under the project; running the full suite"
+                  summary "### pytest mode: full (fallback)"$'\n\n'"testmon selected zero tests although files changed under the project, so the full suite ran."
+                  run_full
+                else
+                  summary "### pytest mode: affected"$'\n\n'"testmon selected zero tests and the PR changed only markdown outside the tests' reach."
+                fi
               fi
               ;;
             refresh)
