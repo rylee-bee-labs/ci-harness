@@ -42,3 +42,14 @@ Default is `all`.
   can both count each other and run under-sized; they never over-subscribe.
 - The default is still `0` (serial). The input is now a string; a caller passing a bare number
   should quote it (`pytest-workers: "6"`).
+
+## Warm dependency caches
+
+- **Self-hosted** (`runner.environment == 'self-hosted'`): `UV_CACHE_DIR=<runner.tool_cache>/uv-cache`
+  (every Python job, and reusable-node when `setup-python` is on) and
+  `npm_config_cache=<runner.tool_cache>/npm-cache` (reusable-node). One dir per runner host, shared by
+  all jobs; both tools are safe for concurrent use. A dir that cannot be created or written
+  produces a warning and the tool's default cache.
+- **Hosted**: reusable-node uses setup-node's `cache: npm` (keyed on the package-lock.json under
+  `working-directory`). reusable-python keeps uv's default cache: see Open items.
+- `.venv` and `node_modules` are never cached or shared; a contract test enforces it.
