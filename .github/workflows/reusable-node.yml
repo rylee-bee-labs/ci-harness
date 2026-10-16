@@ -186,6 +186,24 @@ jobs:
           if [ -s "$OTELSPAN_HELPER" ]; then
             bash "$OTELSPAN_HELPER" context --env-file "$OTELSPAN_ENV_FILE" || true
           fi
+      # Self-hosted runners share one uv cache and one npm cache per runner host, outside every
+      # workspace (never .venv or node_modules). Both caches are safe for concurrent use.
+      # Hosted runners use setup-node's own npm cache below (reusable-python uses the pinned setup-uv cache).
+      - name: Warm dependency caches (self-hosted runner-local dirs)
+        if: ${{ runner.environment == 'self-hosted' }}
+        shell: bash
+        env:
+          TOOL_CACHE: ${{ runner.tool_cache }}
+        run: |
+          for pair in UV_CACHE_DIR:uv-cache npm_config_cache:npm-cache; do
+            var=${pair%%:*}; dir="$TOOL_CACHE/${pair#*:}"
+            if mkdir -p "$dir" && [ -w "$dir" ]; then
+              echo "$var=$dir" >> "$GITHUB_ENV"
+              echo "$var=$dir"
+            else
+              echo "::warning::cache dir $dir is not writable; using the default for $var"
+            fi
+          done
       - name: Set up Python (polyglot e2e)
         if: ${{ inputs.setup-python }}
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -200,6 +218,9 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ inputs.node-version }}
+          # Hosted only; self-hosted jobs use the runner-local npm cache above.
+          cache: ${{ runner.environment == 'github-hosted' && 'npm' || '' }}
+          cache-dependency-path: ${{ inputs.working-directory }}/package-lock.json
       - name: Install dependencies from lockfile
         run: npm ci ${{ inputs.npm-ci-args }}
       - name: Build

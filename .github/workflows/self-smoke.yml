@@ -259,6 +259,80 @@ jobs:
       sync-args: "--extra test"
       pytest-args: "--timeout=30 -q"
 
+  # The template's selection step, called for real on a hosted runner. A push to main saves testmon
+  # data to the actions cache, so a PR may run affected or full; either way the job summary says
+  # which and why (the decision logic itself is unit-tested in tests/test_workflow_contracts.py).
+  python-affected-select:
+    name: python template, pytest-select=affected
+    uses: ./.github/workflows/reusable-python.yml
+    with:
+      project-directory: "fixtures/py-demo"
+      sync-args: "--extra test"
+      pytest-args: "--timeout=30 -q"
+      pytest-select: affected
+      junit-artifact-name: pytest-junit-affected
+
+  # testmon itself, on a fixture repo: record, change one module, only its test is selected; a
+  # change with no covering test selects zero (exit 0 or 5; the template turns it into a full run when Python changed);
+  # and xdist + testmon is probed and reported (informational: the template runs testmon serial).
+  affected-fixture:
+    name: testmon select/fallback on a fixture repo
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Prove selection with real pytest-testmon
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install --quiet "pytest>=8,<10" "pytest-testmon>=2.1,<3" pytest-xdist
+          export PATH="$RUNNER_TEMP/venv/bin:$PATH"
+          work="$RUNNER_TEMP/affected"
+          rm -rf "$work"; cp -r fixtures/affected-demo "$work"; cd "$work"
+          export TESTMON_DATAFILE="$work/.testmondata"
+          ran() { python3 -c 'import sys,xml.etree.ElementTree as E; print(" ".join(sorted(c.get("name") for c in E.parse(sys.argv[1]).getroot().iter("testcase"))))' "$1"; }
+
+          pytest -q --testmon-noselect --junit-xml=j0.xml
+          echo "recorded run:   $(ran j0.xml)"
+          [ "$(ran j0.xml)" = "test_add test_shout" ]
+
+          printf '\n# touched\ndef sub(a: int, b: int) -> int:\n    return a - b\n' >> calc.py
+          pytest -q --testmon --testmon-forceselect --junit-xml=j1.xml
+          echo "after calc.py:  $(ran j1.xml)"
+          [ "$(ran j1.xml)" = "test_add" ]
+
+          # Nothing covers this module: testmon selects zero tests. Depending on the testmon version
+          # that is exit 5 or "no tests ran" with exit 0, so the template counts tests in the junit
+          # file (the same grep as reusable-python) instead of trusting the exit code.
+          count() { grep -o -m1 ' tests="[0-9]*"' "$1" | grep -o '[0-9]*'; }
+          echo 'VALUE = 1' > orphan.py
+          rc=0; pytest -q --testmon --testmon-forceselect --junit-xml=j2.xml || rc=$?
+          echo "orphan change:  exit $rc, selected $(count j2.xml)"
+          [ "$rc" -eq 0 ] || [ "$rc" -eq 5 ]
+          [ "$(count j2.xml)" -eq 0 ]   # template: Python file changed + zero selected => FULL suite
+
+          # Docs-only change after a clean re-record: also zero selected, which the template accepts
+          # (exit 0 plus a summary line) because no Python file under the project changed.
+          rm orphan.py
+          pytest -q --testmon-noselect --junit-xml=j4.xml
+          echo 'notes' > NOTES.md
+          rc=0; pytest -q --testmon --testmon-forceselect --junit-xml=j5.xml || rc=$?
+          echo "docs change:    exit $rc, selected $(count j5.xml)"
+          [ "$rc" -eq 0 ] || [ "$rc" -eq 5 ]
+          [ "$(count j5.xml)" -eq 0 ]
+
+          # Informational: does testmon cooperate with xdist here? The template does not depend on it.
+          if pytest -q --testmon-noselect -n 2 --junit-xml=j3.xml >/dev/null 2>&1 && [ "$(ran j3.xml)" = "test_add test_shout" ]; then
+            echo "xdist+testmon:  works in this setup (template still runs testmon serial)"
+          else
+            echo "xdist+testmon:  does NOT work in this setup; serial testmon is the pattern"
+          fi
+
   node:
     name: node template
     uses: ./.github/workflows/reusable-node.yml
