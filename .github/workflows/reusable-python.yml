@@ -310,7 +310,8 @@ jobs:
           # Self-hosted runners keep testmon data per repo and base branch on the runner host.
           # Hosted runners get one file, restored by actions/cache into $RUNNER_TEMP/testmon-hosted.
           hosted_file="$RUNNER_TEMP/testmon-hosted/.testmondata"
-          [ "${RUNNER_ENVIRONMENT:-}" = self-hosted ] && selfhosted=1 || selfhosted=0
+          selfhosted=0
+          if [ "${RUNNER_ENVIRONMENT:-}" = self-hosted ]; then selfhosted=1; fi
           store="$TOOL_CACHE"
           work="$RUNNER_TEMP/testmon"
           rm -rf "$work"; mkdir -p "$work"
@@ -338,8 +339,9 @@ jobs:
             [ -s "$data" ] || decide full "no testmon data restored from the actions cache for base ${base:0:12} (none saved yet, or evicted)"
             # Only data saved for exactly this PR's base is trusted (the cache service may also
             # prefix-match a primary key, so check what was actually restored).
-            [ "$HOSTED_BASE_SHA" = "$base" ] && [ "$HOSTED_RESTORED_KEY" = "$HOSTED_KEY_PREFIX$base" ] \
-              || decide full "testmon data restored is for another commit (${HOSTED_RESTORED_KEY:-unknown key}), not base ${base:0:12}"
+            if [ "$HOSTED_BASE_SHA" != "$base" ] || [ "$HOSTED_RESTORED_KEY" != "$HOSTED_KEY_PREFIX$base" ]; then
+              decide full "testmon data restored is for another commit (${HOSTED_RESTORED_KEY:-unknown key}), not base ${base:0:12}"
+            fi
             origin="testmon data for base ${base:0:12}"
           fi
 
