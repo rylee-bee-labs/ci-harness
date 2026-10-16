@@ -5,6 +5,7 @@ the preflight is every job's first step, every runner job in every workflow is b
 reusable-python reports failures, and the secret scan stays narrow on PRs but full
 everywhere else.
 """
+import hashlib
 import re
 import subprocess
 import sys
@@ -91,18 +92,20 @@ class EveryJobIsBoundedTest(unittest.TestCase):
     def test_every_runner_job_declares_a_timeout(self) -> None:
         for path in sorted(WF.glob("*.yml")):
             jobs = jobs_in(path.read_text())
-            self.assertTrue(jobs, path.name)
+            with self.subTest(file=path.name):
+                self.assertTrue(jobs, path.name)
             for name, body in jobs.items():
-                if any(line.startswith("    uses:") for line in body):
-                    continue  # reusable-workflow call: timeout-minutes is not allowed
-                self.assertTrue(
-                    any(line.startswith("    runs-on:") for line in body),
-                    f"{path.name}: job {name!r} has neither runs-on nor uses",
-                )
-                self.assertTrue(
-                    any(line.startswith("    timeout-minutes:") for line in body),
-                    f"{path.name}: job {name!r} has no timeout-minutes",
-                )
+                with self.subTest(file=path.name, job=name):
+                    if any(line.startswith("    uses:") for line in body):
+                        continue  # reusable-workflow call: timeout-minutes is not allowed
+                    self.assertTrue(
+                        any(line.startswith("    runs-on:") for line in body),
+                        f"{path.name}: job {name!r} has neither runs-on nor uses",
+                    )
+                    self.assertTrue(
+                        any(line.startswith("    timeout-minutes:") for line in body),
+                        f"{path.name}: job {name!r} has no timeout-minutes",
+                    )
 
 
 class PythonTemplateTest(unittest.TestCase):
@@ -189,12 +192,17 @@ class AffectedSelectTest(unittest.TestCase):
         git(repo, "checkout", "-q", "--detach", "HEAD")
         return repo, base
 
+    @staticmethod
+    def store_dir(project_dir: str, python_version: str = "3.12") -> str:
+        """The self-hosted store's python + project-dir segment, as the step computes it."""
+        return f"{python_version}-{hashlib.sha256(project_dir.encode()).hexdigest()[:16]}"
+
     def run_select(self, repo: Path, root: Path, base: str | None, cwd: str = ".", hosted_data: str | None = None,
                    **env: str) -> dict[str, str]:
         tool, temp = root / "tool", root / "temp"
         temp.mkdir(exist_ok=True)
         if base:
-            d = tool / "testmon" / "o" / "r" / "main"
+            d = tool / "testmon" / "o" / "r" / "main" / self.store_dir(cwd)
             d.mkdir(parents=True, exist_ok=True)
             (d / f"{base}.testmondata").write_text("db")
         if hosted_data is not None:  # what actions/cache/restore would have put there
@@ -206,6 +214,7 @@ class AffectedSelectTest(unittest.TestCase):
         full = {"PATH": "/usr/bin:/bin", "HOME": str(root), "RUNNER_ENVIRONMENT": "self-hosted",
                 "RUNNER_TEMP": str(temp), "TOOL_CACHE": str(tool), "GITHUB_ENV": str(genv),
                 "GITHUB_STEP_SUMMARY": str(gsum), "GITHUB_SHA": "f" * 40, "PYTEST_SELECT": "affected",
+                "PYTHON_VERSION": "3.12",
                 "EVENT_NAME": "pull_request", "REF_NAME": "1/merge", "DEFAULT_BRANCH": "main",
                 "BASE_REF": "main", "REPOSITORY": "o/r", "PROJECT_DIR": cwd, **env}
         subprocess.run(["bash", "-c", self.script], cwd=repo / cwd, env=full, check=True, capture_output=True)
@@ -336,7 +345,8 @@ class AffectedSelectTest(unittest.TestCase):
     def test_push_to_default_branch_refreshes_and_other_events_run_full(self) -> None:
         out = self.check({"pkg/a.py": "x = 2\n"}, "refresh", "recording testmon data",
                          EVENT_NAME="push", REF_NAME="main")
-        self.assertTrue(out["PYTEST_PUBLISH_FILE"].endswith("/testmon/o/r/main/" + "f" * 40 + ".testmondata"))
+        self.assertTrue(out["PYTEST_PUBLISH_FILE"].endswith(
+            f"/testmon/o/r/main/{self.store_dir('.')}/" + "f" * 40 + ".testmondata"))
         self.check({"pkg/a.py": "x = 2\n"}, "full", "not a pull_request", EVENT_NAME="push", REF_NAME="dev")
 
     def test_unknown_select_value_is_an_error(self) -> None:
@@ -617,6 +627,55 @@ class HostedUvCacheTest(unittest.TestCase):
         self.assertEqual(text.count("if: ${{ runner.environment == 'github-hosted' }}"), jobs)
         self.assertEqual(text.count("enable-cache: true"), jobs)
         self.assertIn("astral-sh/setup-uv", (WF.parent.parent / "pins" / "ACTIONS.md").read_text())
+
+
+class OtelHelperPinTest(unittest.TestCase):
+    """The remote fetch of scripts/otel-span.sh is pinned to one commit and checked by sha256."""
+
+    def test_every_fetch_is_pinned_to_one_sha_and_matches_the_tree(self) -> None:
+        root = WF.parent.parent
+        digest = hashlib.sha256((root / "scripts" / "otel-span.sh").read_bytes()).hexdigest()
+        urls: list[str] = []
+        pins: list[str] = []
+        for path in TEMPLATES:
+            text = path.read_text()
+            urls += re.findall(r"OTELSPAN_HELPER_URL: (\S+)", text)
+            pins += re.findall(r"OTELSPAN_HELPER_SHA256: (\S+)", text)
+        # Every fetch carries both a pinned URL and the digest its download is checked against.
+        self.assertEqual(len(urls), len(pins))
+        self.assertGreaterEqual(len(urls), 10)
+        # One fixed commit, not a branch: a moved `main` cannot change what a job runs.
+        self.assertEqual(len(set(urls)), 1)
+        for url in urls:
+            self.assertRegex(
+                url,
+                r"^https://raw\.githubusercontent\.com/rylee-bee-labs/ci-harness/[0-9a-f]{40}/scripts/otel-span\.sh$",
+            )
+        # The pin cannot drift silently: the digest is the in-tree helper's own.
+        for pin in pins:
+            self.assertEqual(pin, digest)
+
+
+
+class TestmonPruneKeepsSiblingStores(unittest.TestCase):
+    """The publish step's prune (the two `find` lines) runs for real against a temp store: two project dirs on one
+    repo and branch keep each other's data; only this store's older commits and the old flat layout go."""
+
+    def test_prune_keeps_the_sibling_store(self):
+        text = read("reusable-python.yml")
+        lines = [ln.strip() for ln in text.splitlines() if ln.strip().startswith('find "${PYTEST_PUBLISH_FILE')]
+        self.assertEqual(len(lines), 2, lines)
+        with tempfile.TemporaryDirectory() as d:
+            ref = Path(d) / "testmon" / "o_r" / "main"
+            a, b = ref / "keyA", ref / "keyB"
+            a.mkdir(parents=True)
+            b.mkdir(parents=True)
+            for p in (a / "old.testmondata", a / "new.testmondata", b / "theirs.testmondata", ref / "flat.testmondata"):
+                p.write_text("db")
+            env = {"PATH": "/usr/bin:/bin", "PYTEST_PUBLISH_FILE": str(a / "new.testmondata")}
+            subprocess.run(["bash", "-c", "\n".join(lines)], env=env, check=True)
+            left = sorted(str(p.relative_to(ref)) for p in ref.rglob("*.testmondata"))
+        self.assertEqual(left, ["keyA/new.testmondata", "keyB/theirs.testmondata"])
 
 
 if __name__ == "__main__":
