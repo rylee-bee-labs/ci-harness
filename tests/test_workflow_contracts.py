@@ -67,7 +67,7 @@ class PythonTemplateTest(unittest.TestCase):
         self.assertRegex(self.text, r"timeout-minutes:\n(?:        .*\n)+?        default: 30\n")
 
     def test_junit_summary_and_artifact(self) -> None:
-        self.assertEqual(self.text.count('--junit-xml="$JUNIT_XML"'), 2)  # serial and xdist
+        self.assertEqual(self.text.count('--junit-xml="$JUNIT_XML"'), 4)  # serial, xdist, affected, refresh
         self.assertIn(">> \"$GITHUB_STEP_SUMMARY\"", self.text)
         self.assertIn("actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a", self.text)
         for step in ("Pytest failures to job summary", "Upload pytest junit-xml"):
@@ -93,6 +93,172 @@ class PythonTemplateTest(unittest.TestCase):
         self.assertIn("t::test_bad", out)
         self.assertIn("assert 1 == 2", out)
         self.assertNotIn("test_ok", out)
+
+
+def step_script(text: str, name: str) -> str:
+    """The dedented `run:` body of the step called `name` (text-level, stdlib only)."""
+    m = re.search(rf"      - name: {re.escape(name)}\n(?:        .*\n|\n)*?        run: \|\n((?:          .*\n|\n)+)", text)
+    assert m, name
+    return "".join(line[10:] if line.strip() else "\n" for line in m.group(1).splitlines(True))
+
+
+def git(cwd: Path, *args: str) -> str:
+    env = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t",
+           "GIT_COMMITTER_EMAIL": "t@t", "PATH": "/usr/bin:/bin", "HOME": str(cwd)}
+    return subprocess.run(["git", *args], cwd=cwd, env=env, capture_output=True, text=True, check=True).stdout.strip()
+
+
+class AffectedSelectTest(unittest.TestCase):
+    """Runs the real `Select tests` step against throwaway PR-shaped git repos."""
+
+    text = read("reusable-python.yml")
+    script = step_script(text, "Select tests (full or affected)")
+
+    def make_pr(self, root: Path, changed: dict[str, str]) -> tuple[Path, str]:
+        repo = root / "repo"
+        repo.mkdir()
+        git(repo, "init", "-q", "-b", "main")
+        (repo / "pkg").mkdir()
+        (repo / "pkg" / "a.py").write_text("x = 1\n")
+        git(repo, "add", ".")
+        git(repo, "commit", "-qm", "base")
+        base = git(repo, "rev-parse", "HEAD")
+        git(repo, "checkout", "-qb", "pr")
+        for name, body in changed.items():
+            (repo / name).parent.mkdir(parents=True, exist_ok=True)
+            (repo / name).write_text(body)
+        git(repo, "add", ".")
+        git(repo, "commit", "-qm", "pr")
+        git(repo, "checkout", "-q", "main")
+        git(repo, "merge", "-q", "--no-ff", "-m", "merge", "pr")
+        git(repo, "checkout", "-q", "--detach", "HEAD")
+        return repo, base
+
+    def run_select(self, repo: Path, root: Path, base: str | None, **env: str) -> dict[str, str]:
+        tool, temp = root / "tool", root / "temp"
+        temp.mkdir(exist_ok=True)
+        if base:
+            d = tool / "testmon" / "o" / "r" / "main"
+            d.mkdir(parents=True, exist_ok=True)
+            (d / f"{base}.testmondata").write_text("db")
+        genv, gsum = root / "genv", root / "gsum"
+        genv.write_text("")
+        gsum.write_text("")
+        full = {"PATH": "/usr/bin:/bin", "HOME": str(root), "RUNNER_ENVIRONMENT": "self-hosted",
+                "RUNNER_TEMP": str(temp), "TOOL_CACHE": str(tool), "GITHUB_ENV": str(genv),
+                "GITHUB_STEP_SUMMARY": str(gsum), "GITHUB_SHA": "f" * 40, "PYTEST_SELECT": "affected",
+                "EVENT_NAME": "pull_request", "REF_NAME": "1/merge", "DEFAULT_BRANCH": "main",
+                "BASE_REF": "main", "REPOSITORY": "o/r", **env}
+        subprocess.run(["bash", "-c", self.script], cwd=repo, env=full, check=True, capture_output=True)
+        out = dict(line.split("=", 1) for line in genv.read_text().splitlines())
+        out["SUMMARY"] = gsum.read_text()
+        return out
+
+    def check(self, changed: dict[str, str], want: str, reason: str, base_ok: bool = True, **env: str) -> dict[str, str]:
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            repo, base = self.make_pr(root, changed)
+            out = self.run_select(repo, root, base if base_ok else None, **env)
+        self.assertEqual(out["PYTEST_MODE"], want, out)
+        self.assertIn(reason, out["PYTEST_MODE_REASON"])
+        self.assertIn(f"pytest mode: {want}", out["SUMMARY"])  # mode and reason reach the job summary
+        self.assertIn(reason, out["SUMMARY"])
+        return out
+
+    def test_affected_when_data_matches_base(self) -> None:
+        out = self.check({"pkg/a.py": "x = 2\n"}, "affected", "testmon data for base")
+        self.assertEqual(out["PYTEST_CHANGED_UNDER_PROJECT"], "1")
+
+    def test_markdown_only_pr_is_not_flagged_as_package_change(self) -> None:
+        out = self.check({"README.md": "hi\n"}, "affected", "testmon data")
+        self.assertNotIn("PYTEST_CHANGED_UNDER_PROJECT", out)
+
+    def test_no_data_falls_back_to_full(self) -> None:
+        self.check({"pkg/a.py": "x = 2\n"}, "full", "no testmon data", base_ok=False)
+
+    def test_data_for_a_different_base_falls_back_to_full(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            repo, _ = self.make_pr(root, {"pkg/a.py": "x = 2\n"})
+            out = self.run_select(repo, root, "0" * 40)
+        self.assertEqual(out["PYTEST_MODE"], "full")
+        self.assertIn("no testmon data for base", out["PYTEST_MODE_REASON"])
+
+    def test_config_changes_force_full(self) -> None:
+        for name in ("conftest.py", "pkg/conftest.py", "pyproject.toml", "uv.lock", "setup.cfg",
+                     "pytest.ini", "tox.ini", ".github/workflows/ci.yml"):
+            with self.subTest(name):
+                self.check({name: "x\n", "pkg/a.py": "x = 2\n"}, "full", "test-wide config")
+
+    def test_all_is_the_default_behaviour(self) -> None:
+        self.check({"pkg/a.py": "x = 2\n"}, "full", "pytest-select=all", PYTEST_SELECT="all")
+
+    def test_push_to_default_branch_refreshes_and_other_events_run_full(self) -> None:
+        out = self.check({"pkg/a.py": "x = 2\n"}, "refresh", "recording testmon data",
+                         EVENT_NAME="push", REF_NAME="main")
+        self.assertTrue(out["PYTEST_PUBLISH_FILE"].endswith("/testmon/o/r/main/" + "f" * 40 + ".testmondata"))
+        self.check({"pkg/a.py": "x = 2\n"}, "full", "not a pull_request", EVENT_NAME="push", REF_NAME="dev")
+
+    def test_unknown_select_value_is_an_error(self) -> None:
+        with tempfile.TemporaryDirectory() as d, self.assertRaises(subprocess.CalledProcessError):
+            root = Path(d)
+            repo, base = self.make_pr(root, {"pkg/a.py": "x = 2\n"})
+            self.run_select(repo, root, base, PYTEST_SELECT="sometimes")
+
+
+class AffectedRunTest(unittest.TestCase):
+    """The `Run pytest` step with a stub `uv`: fallback on zero selection, publish only when green."""
+
+    script = step_script(read("reusable-python.yml"), "Run pytest")
+
+    def run_step(self, mode: str, rc: int, changed: str = "", workers: str = "0") -> tuple[str, str, Path, Path]:
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        root = Path(d.name)
+        (root / "bin").mkdir()
+        log = root / "uv.log"
+        # Stub: record argv; a testmon run exits `rc` and writes its data file.
+        (root / "bin" / "uv").write_text(
+            '#!/bin/bash\necho "$*" >> "%s"\n'
+            'case "$*" in *--testmon*) echo db > "$TESTMON_DATAFILE"; exit %d;; esac\nexit 0\n' % (log, rc)
+        )
+        (root / "bin" / "uv").chmod(0o755)
+        gsum = root / "gsum"
+        gsum.write_text("")
+        publish = root / "pub" / "x.testmondata"
+        env = {"PATH": f"{root / 'bin'}:/usr/bin:/bin", "GITHUB_STEP_SUMMARY": str(gsum), "JUNIT_XML": str(root / "j.xml"),
+               "PYTEST_MODE": mode, "PYTEST_WORKERS": workers, "TESTMON_DATAFILE": str(root / "db"),
+               "PYTEST_PUBLISH_FILE": str(publish), "PYTEST_CHANGED_UNDER_PROJECT": changed}
+        self.proc = subprocess.run(["bash", "-e", "-c", self.script.replace("${{ inputs.pytest-args }}", "-q")],
+                                   env=env, capture_output=True, text=True)
+        return log.read_text(), gsum.read_text(), publish, root
+
+    def test_zero_selected_with_changed_files_runs_full(self) -> None:
+        log, summary, _, _ = self.run_step("affected", 5, changed="1")
+        self.assertEqual(self.proc.returncode, 0, self.proc.stderr)
+        self.assertIn("zero tests", summary)
+        self.assertEqual(log.count("pytest --junit-xml"), 1)  # the full re-run is plain pytest
+
+    def test_zero_selected_without_package_changes_is_reported_not_failed(self) -> None:
+        log, summary, _, _ = self.run_step("affected", 5, changed="")
+        self.assertEqual(self.proc.returncode, 0)
+        self.assertNotIn("pytest --junit-xml", log)  # no full re-run
+        self.assertIn("zero tests", summary)
+
+    def test_affected_failure_fails_the_step(self) -> None:
+        self.run_step("affected", 1, changed="1")
+        self.assertEqual(self.proc.returncode, 1)
+
+    def test_affected_runs_serial_with_forceselect(self) -> None:
+        log, *_ = self.run_step("affected", 0, workers="4")
+        self.assertIn("--testmon --testmon-forceselect", log)
+        self.assertNotIn(" -n ", log)
+
+    def test_refresh_publishes_only_green_runs(self) -> None:
+        _, _, publish, _ = self.run_step("refresh", 0)
+        self.assertTrue(publish.exists())
+        _, _, publish, _ = self.run_step("refresh", 1)
+        self.assertFalse(publish.exists())
 
 
 class SecretScanTest(unittest.TestCase):
