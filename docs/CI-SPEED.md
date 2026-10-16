@@ -21,6 +21,11 @@ Default is `all`.
   `setup.cfg`, `pytest.ini`, `tox.ini` or `.github/workflows/*` file (anywhere in the repo), a non-PR
   event, **any changed file that is not a `.py` file under `project-directory`**, and testmon selecting
   zero tests (pytest exit 5 or an empty junit file).
+- **Reading the mode from a later step.** The selection step writes the mode and reason to the job
+  summary and also exports `PYTEST_MODE` and `PYTEST_MODE_REASON`. A later step (for example
+  `post-test-commands`) must read the exports: `$GITHUB_STEP_SUMMARY` is a new, empty file for every
+  step, so grepping it from another step never finds the heading (self-smoke's
+  `python-affected-select` did exactly that on #60).
 - **xdist.** testmon runs are serial: `pytest-workers` is ignored in `affected` and refresh
   modes. The self-smoke job `affected-fixture` probes xdist + testmon and prints whether it works
   there; the template does not depend on it. The refresh stays serial because that probe is informational, not proof, and bad recorded data would make later runs select too little.
