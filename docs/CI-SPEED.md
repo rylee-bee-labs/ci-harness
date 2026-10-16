@@ -24,9 +24,7 @@ Default is `all`.
 
 ## Open items
 
-- Hosted-runner caching needs `astral-sh/setup-uv` and `actions/cache` pinned by SHA in
-  `pins/ACTIONS.md`. The SHAs must be resolved with `git ls-remote` (bump protocol) and could not
-  be here (no network), so they are not added. Nothing was guessed.
+- Hosted runners restore and save uv's cache with `astral-sh/setup-uv` v10.3.0 (`1c37ad07…`, resolved with `git ls-remote` 2026-10-15, recorded in `pins/ACTIONS.md`), keyed on `**/uv.lock`.
 
 ## pytest-workers: auto
 

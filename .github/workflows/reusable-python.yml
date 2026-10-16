@@ -218,7 +218,7 @@ jobs:
           fi
       # Self-hosted runners share one uv cache per runner host (uv's cache is safe for concurrent
       # use), so a job's `uv sync` is mostly hardlinks. Only the cache is shared: never .venv.
-      # Hosted runners keep uv's default cache dir (setup-uv's cache is not pinned yet; docs/CI-SPEED.md).
+      # Hosted runners use setup-uv's cache instead (the step after Bootstrap uv).
       - name: Warm uv cache (self-hosted runner-local dir)
         if: ${{ runner.environment == 'self-hosted' }}
         shell: bash
@@ -236,6 +236,15 @@ jobs:
           python-version: ${{ inputs.python-version }}
       - name: Bootstrap uv
         run: pip install uv==${{ inputs.uv-version }}
+      # Hosted runners: restore and save uv's package cache through setup-uv (keyed on uv.lock).
+      # Self-hosted runners use the runner-local UV_CACHE_DIR set above instead.
+      - name: Warm uv cache (hosted, setup-uv)
+        if: ${{ runner.environment == 'github-hosted' }}
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: ${{ inputs.uv-version }}
+          enable-cache: true
+          cache-dependency-glob: "**/uv.lock"
       - name: Sync locked dependencies
         run: uv sync --frozen ${{ inputs.sync-args }}
       # junit-xml goes to RUNNER_TEMP (outside the workspace, so it cannot be committed or
@@ -551,7 +560,7 @@ jobs:
           fi
       # Self-hosted runners share one uv cache per runner host (uv's cache is safe for concurrent
       # use), so a job's `uv sync` is mostly hardlinks. Only the cache is shared: never .venv.
-      # Hosted runners keep uv's default cache dir (setup-uv's cache is not pinned yet; docs/CI-SPEED.md).
+      # Hosted runners use setup-uv's cache instead (the step after Bootstrap uv).
       - name: Warm uv cache (self-hosted runner-local dir)
         if: ${{ runner.environment == 'self-hosted' }}
         shell: bash
@@ -569,6 +578,15 @@ jobs:
           python-version: ${{ inputs.python-version }}
       - name: Bootstrap uv
         run: pip install uv==${{ inputs.uv-version }}
+      # Hosted runners: restore and save uv's package cache through setup-uv (keyed on uv.lock).
+      # Self-hosted runners use the runner-local UV_CACHE_DIR set above instead.
+      - name: Warm uv cache (hosted, setup-uv)
+        if: ${{ runner.environment == 'github-hosted' }}
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: ${{ inputs.uv-version }}
+          enable-cache: true
+          cache-dependency-glob: "**/uv.lock"
       - name: Sync locked dependencies
         run: uv sync --frozen ${{ inputs.sync-args }}
       - name: Run ruff
@@ -669,7 +687,7 @@ jobs:
           fi
       # Self-hosted runners share one uv cache per runner host (uv's cache is safe for concurrent
       # use), so a job's `uv sync` is mostly hardlinks. Only the cache is shared: never .venv.
-      # Hosted runners keep uv's default cache dir (setup-uv's cache is not pinned yet; docs/CI-SPEED.md).
+      # Hosted runners use setup-uv's cache instead (the step after Bootstrap uv).
       - name: Warm uv cache (self-hosted runner-local dir)
         if: ${{ runner.environment == 'self-hosted' }}
         shell: bash
@@ -687,6 +705,15 @@ jobs:
           python-version: ${{ inputs.python-version }}
       - name: Bootstrap uv
         run: pip install uv==${{ inputs.uv-version }}
+      # Hosted runners: restore and save uv's package cache through setup-uv (keyed on uv.lock).
+      # Self-hosted runners use the runner-local UV_CACHE_DIR set above instead.
+      - name: Warm uv cache (hosted, setup-uv)
+        if: ${{ runner.environment == 'github-hosted' }}
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: ${{ inputs.uv-version }}
+          enable-cache: true
+          cache-dependency-glob: "**/uv.lock"
       - name: Sync locked dependencies
         run: uv sync --frozen ${{ inputs.sync-args }}
       - name: Run bandit

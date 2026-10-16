@@ -359,7 +359,8 @@ class CacheTest(unittest.TestCase):
         for block in self.py.split("\n    steps:\n")[1:]:
             self.assertLess(block.index("Warm uv cache"), block.index("uv sync --frozen"))
             self.assertLess(block.index("Preflight"), block.index("Warm uv cache"))
-        self.assertEqual(self.py.count("name: Warm uv cache"), 3)
+        self.assertEqual(self.py.count("name: Warm uv cache (self-hosted"), 3)
+        self.assertEqual(self.py.count("name: Warm uv cache (hosted"), 3)
 
     def test_self_hosted_cache_dirs_live_in_the_tool_cache(self) -> None:
         self.assertIn("CACHE_DIR: ${{ runner.tool_cache }}/uv-cache", self.py)
@@ -417,3 +418,13 @@ class SecretScanTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HostedUvCacheTest(unittest.TestCase):
+    def test_hosted_runners_use_pinned_setup_uv_cache(self) -> None:
+        text = read("reusable-python.yml")
+        jobs = len(re.findall(r"^    runs-on:", text, re.M))
+        self.assertEqual(text.count("astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0"), jobs)
+        self.assertEqual(text.count("if: ${{ runner.environment == 'github-hosted' }}"), jobs)
+        self.assertEqual(text.count("enable-cache: true"), jobs)
+        self.assertIn("astral-sh/setup-uv", (WF.parent.parent / "pins" / "ACTIONS.md").read_text())
