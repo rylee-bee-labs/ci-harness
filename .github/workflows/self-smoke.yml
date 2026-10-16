@@ -259,8 +259,9 @@ jobs:
       sync-args: "--extra test"
       pytest-args: "--timeout=30 -q"
 
-  # The template's selection step, called for real (hosted runner: no testmon store, so it must say
-  # "full" and why).
+  # The template's selection step, called for real on a hosted runner. A push to main saves testmon
+  # data to the actions cache, so a PR may run affected or full; either way the job summary says
+  # which and why (the decision logic itself is unit-tested in tests/test_workflow_contracts.py).
   python-affected-select:
     name: python template, pytest-select=affected
     uses: ./.github/workflows/reusable-python.yml

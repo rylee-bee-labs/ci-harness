@@ -221,22 +221,34 @@ class AffectedSelectTest(unittest.TestCase):
         out = self.check({"pkg/a.py": "x = 2\n"}, "affected", "testmon data for base")
         self.assertEqual(out["PYTEST_CHANGED_UNDER_PROJECT"], "1")
 
-    def test_markdown_only_pr_is_not_flagged_as_package_change(self) -> None:
-        out = self.check({"README.md": "hi\n"}, "affected", "testmon data")
-        self.assertNotIn("PYTEST_CHANGED_UNDER_PROJECT", out)
+    def test_markdown_change_runs_full_suite(self) -> None:
+        # A test may read markdown (doc checks), and testmon cannot see that.
+        self.check({"README.md": "hi\n"}, "full", "testmon cannot track (README.md)")
 
-    def test_change_outside_the_project_directory_is_not_a_project_change(self) -> None:
-        # The step runs inside the project directory (here pkg/); a code change elsewhere must not count.
+    def test_data_file_beside_python_runs_full_suite(self) -> None:
+        # A .py change does not make a data/template change under the project visible to testmon.
+        self.check({"pkg/a.py": "x = 2\n", "pkg/data.json": "{}\n"}, "full", "pkg/data.json")
+
+    def test_extensionless_script_runs_full_suite(self) -> None:
+        self.check({"bin/tool": "#!/usr/bin/env python3\n"}, "full", "bin/tool")
+
+    def test_python_outside_the_project_directory_runs_full_suite(self) -> None:
+        # The step runs inside the project directory (here pkg/); a workspace sibling is not
+        # fingerprinted by a testmon rooted there, so it cannot be trusted to select for it.
+        for changed in ({"other/b.py": "y = 2\n"}, {"other/b.py": "y = 2\n", "pkg/a.py": "x = 2\n"}):
+            with tempfile.TemporaryDirectory() as d:
+                root = Path(d)
+                repo, base = self.make_pr(root, changed)
+                out = self.run_select(repo, root, base, cwd="pkg")
+                self.assertEqual(out["PYTEST_MODE"], "full", out)
+                self.assertIn("other/b.py", out["PYTEST_MODE_REASON"])
+
+    def test_python_under_the_project_directory_is_affected(self) -> None:
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
-            repo, base = self.make_pr(root, {"other/b.py": "y = 2\n"})
+            repo, base = self.make_pr(root, {"pkg/a.py": "x = 2\n", "pkg/sub/c.py": "z = 1\n"})
             out = self.run_select(repo, root, base, cwd="pkg")
-            self.assertEqual(out["PYTEST_MODE"], "affected")
-            self.assertNotIn("PYTEST_CHANGED_UNDER_PROJECT", out)
-        with tempfile.TemporaryDirectory() as d:
-            root = Path(d)
-            repo, base = self.make_pr(root, {"other/b.py": "y = 2\n", "pkg/a.py": "x = 2\n"})
-            out = self.run_select(repo, root, base, cwd="pkg")
+            self.assertEqual(out["PYTEST_MODE"], "affected", out)
             self.assertEqual(out["PYTEST_CHANGED_UNDER_PROJECT"], "1")
 
     def test_hosted_uses_restored_cache_file(self) -> None:

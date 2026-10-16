@@ -16,16 +16,19 @@ Default is `all`.
   exact key for `pull_request.base.sha`, else the newest entry with the same prefix. Stale data is safe: testmon
   compares current file fingerprints with the stored ones, so it can only select more tests. Nothing restored
   means the full suite. The job summary says whether the data was for the base or older.
-- **Full-suite fallbacks**, each stated in the job summary: no data, data for another base commit,
-  a changed `conftest.py`, `pyproject.toml`, `uv.lock`, `setup.cfg`, `pytest.ini`, `tox.ini` or
-  `.github/workflows/*` file (anywhere in the repo), a non-PR event, and testmon selecting zero tests
-  (pytest exit 5 or an empty junit file) while a non-markdown file changed under `project-directory`
-  (that becomes a full run; a change only outside the project, or only markdown, is accepted with a summary line).
+- **Full-suite fallbacks**, each stated in the job summary: no data (self-hosted: none for the
+  PR's base commit; hosted: nothing restored), a changed `conftest.py`, `pyproject.toml`, `uv.lock`,
+  `setup.cfg`, `pytest.ini`, `tox.ini` or `.github/workflows/*` file (anywhere in the repo), a non-PR
+  event, **any changed file that is not a `.py` file under `project-directory`**, and testmon selecting
+  zero tests (pytest exit 5 or an empty junit file).
 - **xdist.** testmon runs are serial: `pytest-workers` is ignored in `affected` and refresh
   modes. The self-smoke job `affected-fixture` probes xdist + testmon and prints whether it works
   there; the template does not depend on it. The refresh stays serial because that probe is informational, not proof, and bad recorded data would make later runs select too little.
-- testmon tracks Python files. A PR that changes only data files a test reads can be skipped by
-  testmon; put such paths in the fallback list if a repo needs it.
+- testmon tracks Python files it saw run **in the pytest process**, under its rootdir. That is why
+  any non-`.py` change (data, templates, markdown a test reads, extensionless scripts) and any
+  Python outside `project-directory` runs the full suite. It also cannot see code a test runs in a
+  **subprocess**: a repo whose tests mostly drive scripts through `subprocess` should not opt in,
+  because testmon would select too few tests there.
 
 ## pytest-workers: auto
 

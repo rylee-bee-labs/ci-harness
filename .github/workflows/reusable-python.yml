@@ -81,11 +81,13 @@ on:
           pytest-testmon says the PR touched, using testmon data recorded on the base branch
           (self-hosted: a runner-local dir under runner.tool_cache; hosted: actions/cache, saved on
           a push to the default branch and restored on the PR, see docs/CI-SPEED.md). Falls back to the FULL suite, and says why in
-          the job summary, when there is no data, the data is for another base commit, the PR
-          touches conftest.py, pyproject.toml, uv.lock, setup.cfg, pytest.ini, tox.ini or a
-          .github/workflows file, or testmon selects zero tests although files changed. A push to
-          the default branch always runs the full suite and refreshes the data. testmon runs
-          are serial (pytest-testmon is installed for the run only); see README.
+          the job summary, when there is no data (self-hosted: none for the PR's base commit;
+          hosted: nothing restored, while an older base's data is used because stale data only
+          selects more), the PR touches conftest.py, pyproject.toml, uv.lock, setup.cfg,
+          pytest.ini, tox.ini or a .github/workflows file, the PR changes any file that is not a
+          .py file under project-directory, or testmon selects zero tests. A push to the default
+          branch always runs the full suite and refreshes the data. testmon runs are serial
+          (pytest-testmon is installed for the run only); see docs/CI-SPEED.md.
         type: string
         required: false
         default: all
@@ -344,15 +346,17 @@ jobs:
           trigger=$(printf '%s\n' "$changed" | grep -E '(^|/)(conftest\.py|pyproject\.toml|uv\.lock|setup\.cfg|pytest\.ini|tox\.ini)$|^\.github/workflows/' | head -n 3 | paste -sd, - || true)
           [ -z "$trigger" ] || decide full "PR touches test-wide config ($trigger)"
 
-          cp "$data" "$work/.testmondata"
-          # Only files under the project directory count. The pathspec is anchored at the repo top
-          # because this step runs inside the project directory. Lockfile and pyproject changes
-          # already forced a full run above.
+          # testmon only fingerprints Python it saw run, under its rootdir. So affected mode is used
+          # only when every changed file is a .py file under the project directory. Anything else
+          # (data, templates, JSON, markdown a test may read, extensionless scripts, Python outside
+          # the project such as a workspace sibling) runs the full suite. Paths are repo-relative.
           proj="${PROJECT_DIR#./}"; proj="${proj%/}"; [ "$proj" != . ] || proj=""
-          if [ -n "$(git diff --name-only 'HEAD^1' HEAD -- ":(top)$proj" ':(top,exclude)*.md')" ]; then
-            echo "PYTEST_CHANGED_UNDER_PROJECT=1" >> "$GITHUB_ENV"
-          fi
-          decide affected "$origin; PR changes: $(printf '%s\n' "$changed" | wc -l) file(s)"
+          untracked=$(printf '%s\n' "$changed" | awk -v p="$proj" 'NF { inproj = (p == "" || index($0, p "/") == 1); if (!(inproj && $0 ~ /\.py$/)) print }' | head -n 3 | paste -sd, - || true)
+          [ -z "$untracked" ] || decide full "PR changes files testmon cannot track ($untracked); affected mode needs every change to be a .py file under ${proj:-the repo}"
+
+          cp "$data" "$work/.testmondata"
+          [ -z "$changed" ] || echo "PYTEST_CHANGED_UNDER_PROJECT=1" >> "$GITHUB_ENV"
+          decide affected "$origin; PR changes: $(printf '%s\n' "$changed" | wc -l) .py file(s) under ${proj:-the repo}"
       # junit-xml goes to RUNNER_TEMP (outside the workspace, so it cannot be committed or
       # picked up by a repo's own globbing); the next two steps read it even when pytest failed.
       - name: Run pytest
@@ -435,7 +439,7 @@ jobs:
                   summary "### pytest mode: full (fallback)"$'\n\n'"testmon selected zero tests although files changed under the project, so the full suite ran."
                   run_full
                 else
-                  summary "### pytest mode: affected"$'\n\n'"testmon selected zero tests and the PR changed only markdown outside the tests' reach."
+                  summary "### pytest mode: affected"$'\n\n'"testmon selected zero tests and the PR changed no files."
                 fi
               fi
               ;;
