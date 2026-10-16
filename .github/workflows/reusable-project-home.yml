@@ -154,7 +154,8 @@ jobs:
           OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: ${{ vars.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT }}
           OTEL_SERVICE_NAME: ${{ vars.OTEL_SERVICE_NAME }}
           ESTATE_HOST_CLASS: ${{ vars.ESTATE_HOST_CLASS }}
-          OTELSPAN_HELPER_URL: https://raw.githubusercontent.com/rylee-bee-labs/ci-harness/main/scripts/otel-span.sh
+          OTELSPAN_HELPER_URL: https://raw.githubusercontent.com/rylee-bee-labs/ci-harness/0169f7367fe00aa525fe398aa87b040210b22e86/scripts/otel-span.sh
+          OTELSPAN_HELPER_SHA256: c28910154fb3a6b9b7aaf79a65b863acee7fd7b7fa905a1c0f2b4ffb375e81e8
           OTELSPAN_HELPER: ${{ runner.temp }}/otel-span.sh
           OTELSPAN_ENV_FILE: ${{ runner.temp }}/otel-ctx.env
           OTELSPAN_JOB_KEY: reusable-project-home:report
@@ -183,10 +184,11 @@ jobs:
           # never be correlated. It is a read of a commit message, NOT a
           # checkout: a reporter must stay cheap, and cloning the caller to read
           # one trailer would put telemetry ahead of the work it observes.
-          if curl -fsSL --max-time 15 "$OTELSPAN_HELPER_URL" -o "$OTELSPAN_HELPER"; then
+          if curl -fsSL --max-time 15 "$OTELSPAN_HELPER_URL" -o "$OTELSPAN_HELPER" \
+            && echo "$OTELSPAN_HELPER_SHA256  $OTELSPAN_HELPER" | sha256sum -c -; then
             bash "$OTELSPAN_HELPER" context --env-file "$OTELSPAN_ENV_FILE" || true
           else
-            echo "::notice::otel: span helper unavailable; telemetry stays off for this job"
+            echo "::notice::otel: span helper unavailable or failed its sha256 check; telemetry stays off for this job"
             rm -f "$OTELSPAN_HELPER"
           fi
 

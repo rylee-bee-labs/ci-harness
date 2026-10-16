@@ -258,6 +258,7 @@ jobs:
       project-directory: "fixtures/py-demo"
       sync-args: "--extra test"
       pytest-args: "--timeout=30 -q"
+      pytest-workers: "6"
 
   # The template's selection step, called for real on a hosted runner. A push to main saves testmon
   # data to the actions cache, so a PR may run affected or full; either way the job summary says
@@ -271,6 +272,13 @@ jobs:
       pytest-args: "--timeout=30 -q"
       pytest-select: affected
       junit-artifact-name: pytest-junit-affected
+      pytest-workers: "auto"
+      post-test-commands: |
+        # The template's selection step must say which mode ran and why in the job summary:
+        # assert both here, rather than trusting a green job (the decision logic itself is
+        # unit-tested in tests/test_workflow_contracts.py).
+        grep -q '^### pytest mode: ' "$GITHUB_STEP_SUMMARY"
+        grep -A2 '^### pytest mode: ' "$GITHUB_STEP_SUMMARY" | sed -n '3p' | grep -q '[^[:space:]]'
 
   # testmon itself, on a fixture repo: record, change one module, only its test is selected; a
   # change with no covering test selects zero (exit 0 or 5; the template turns it into a full run when Python changed);

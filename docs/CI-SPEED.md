@@ -7,8 +7,8 @@ Default is `all`.
 
 - **Data, self-hosted.** A push to the default branch runs the full suite under `--testmon-noselect` and, only
   if it is green, publishes the testmon db as
-  `<runner.tool_cache>/testmon/<owner>/<repo>/<branch>/<commit sha>.testmondata` (older files for
-  that branch are removed). A PR copies the file named after its merge commit's first parent
+  `<runner.tool_cache>/testmon/<owner>/<repo>/<branch>/<python>-<project-dir hash>/<commit sha>.testmondata`
+  (older files for that branch are removed). A PR copies the file named after its merge commit's first parent
   (the base tip) and never writes back.
 - **Data, hosted.** Runners are throwaway, so the db goes through `actions/cache/save` and
   `actions/cache/restore` (v6.1.0, pinned by SHA). A green push to the default branch saves

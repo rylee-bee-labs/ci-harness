@@ -136,7 +136,8 @@ jobs:
           OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: ${{ vars.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT }}
           OTEL_SERVICE_NAME: ${{ vars.OTEL_SERVICE_NAME }}
           ESTATE_HOST_CLASS: ${{ vars.ESTATE_HOST_CLASS }}
-          OTELSPAN_HELPER_URL: https://raw.githubusercontent.com/rylee-bee-labs/ci-harness/main/scripts/otel-span.sh
+          OTELSPAN_HELPER_URL: https://raw.githubusercontent.com/rylee-bee-labs/ci-harness/0169f7367fe00aa525fe398aa87b040210b22e86/scripts/otel-span.sh
+          OTELSPAN_HELPER_SHA256: c28910154fb3a6b9b7aaf79a65b863acee7fd7b7fa905a1c0f2b4ffb375e81e8
           OTELSPAN_HELPER: ${{ runner.temp }}/otel-span.sh
           OTELSPAN_ENV_FILE: ${{ runner.temp }}/otel-ctx.env
           OTELSPAN_JOB_KEY: reusable-contract-freshness:freshness
@@ -156,8 +157,9 @@ jobs:
           # fetch it from ci-harness otherwise.
           if [ -s "$GITHUB_WORKSPACE/scripts/otel-span.sh" ]; then
             cp "$GITHUB_WORKSPACE/scripts/otel-span.sh" "$OTELSPAN_HELPER"
-          elif ! curl -fsSL --max-time 15 "$OTELSPAN_HELPER_URL" -o "$OTELSPAN_HELPER"; then
-            echo "::notice::otel: span helper unavailable; telemetry stays off for this job"
+          elif ! curl -fsSL --max-time 15 "$OTELSPAN_HELPER_URL" -o "$OTELSPAN_HELPER" \
+            || ! echo "$OTELSPAN_HELPER_SHA256  $OTELSPAN_HELPER" | sha256sum -c -; then
+            echo "::notice::otel: span helper unavailable or failed its sha256 check; telemetry stays off for this job"
             rm -f "$OTELSPAN_HELPER"
           fi
           if [ -s "$OTELSPAN_HELPER" ]; then

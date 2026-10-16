@@ -190,7 +190,8 @@ jobs:
           OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: ${{ vars.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT }}
           OTEL_SERVICE_NAME: ${{ vars.OTEL_SERVICE_NAME }}
           ESTATE_HOST_CLASS: ${{ vars.ESTATE_HOST_CLASS }}
-          OTELSPAN_HELPER_URL: https://raw.githubusercontent.com/rylee-bee-labs/ci-harness/main/scripts/otel-span.sh
+          OTELSPAN_HELPER_URL: https://raw.githubusercontent.com/rylee-bee-labs/ci-harness/0169f7367fe00aa525fe398aa87b040210b22e86/scripts/otel-span.sh
+          OTELSPAN_HELPER_SHA256: c28910154fb3a6b9b7aaf79a65b863acee7fd7b7fa905a1c0f2b4ffb375e81e8
           OTELSPAN_HELPER: ${{ runner.temp }}/otel-span.sh
           OTELSPAN_ENV_FILE: ${{ runner.temp }}/otel-ctx.env
           OTELSPAN_JOB_KEY: reusable-python:test
@@ -210,8 +211,9 @@ jobs:
           # fetch it from ci-harness otherwise.
           if [ -s "$GITHUB_WORKSPACE/scripts/otel-span.sh" ]; then
             cp "$GITHUB_WORKSPACE/scripts/otel-span.sh" "$OTELSPAN_HELPER"
-          elif ! curl -fsSL --max-time 15 "$OTELSPAN_HELPER_URL" -o "$OTELSPAN_HELPER"; then
-            echo "::notice::otel: span helper unavailable; telemetry stays off for this job"
+          elif ! curl -fsSL --max-time 15 "$OTELSPAN_HELPER_URL" -o "$OTELSPAN_HELPER" \
+            || ! echo "$OTELSPAN_HELPER_SHA256  $OTELSPAN_HELPER" | sha256sum -c -; then
+            echo "::notice::otel: span helper unavailable or failed its sha256 check; telemetry stays off for this job"
             rm -f "$OTELSPAN_HELPER"
           fi
           if [ -s "$OTELSPAN_HELPER" ]; then
@@ -287,6 +289,7 @@ jobs:
           REPOSITORY: ${{ github.repository }}
           TOOL_CACHE: ${{ runner.tool_cache }}
           PROJECT_DIR: ${{ inputs.project-directory }}
+          PYTHON_VERSION: ${{ inputs.python-version }}
           HOSTED_KEY_PREFIX: ${{ steps.testmon-key.outputs.prefix }}
           HOSTED_BASE_SHA: ${{ steps.testmon-key.outputs.base }}
           HOSTED_RESTORED_KEY: ${{ steps.testmon-restore.outputs.cache-matched-key }}
@@ -300,6 +303,11 @@ jobs:
             exit 0
           }
           safe() { printf '%s' "$1" | tr -c 'A-Za-z0-9._/\n-' '_' | sed 's#\.\.#__#g'; }
+          # The runner-local store names the interpreter and a hash of the project directory, the
+          # two inputs the hosted key already carries (Testmon cache key, above): two callers can
+          # hold data for the same repo/ref/commit under a different python or project dir, and
+          # selecting from the wrong one would be a silent wrong answer.
+          key_dir="$PYTHON_VERSION-$(printf '%s' "$PROJECT_DIR" | sha256sum | cut -c1-16)"
 
           case "$PYTEST_SELECT" in
             all|affected) ;;
@@ -319,7 +327,7 @@ jobs:
 
           if [ "$EVENT_NAME" = push ] && [ "$REF_NAME" = "$DEFAULT_BRANCH" ]; then
             if [ "$selfhosted" = 1 ]; then
-              echo "PYTEST_PUBLISH_FILE=$store/testmon/$(safe "$REPOSITORY")/$(safe "$REF_NAME")/$GITHUB_SHA.testmondata" >> "$GITHUB_ENV"
+              echo "PYTEST_PUBLISH_FILE=$store/testmon/$(safe "$REPOSITORY")/$(safe "$REF_NAME")/$key_dir/$GITHUB_SHA.testmondata" >> "$GITHUB_ENV"
             else
               # The Save step below uploads this file under the key ...-$GITHUB_SHA.
               echo "PYTEST_PUBLISH_FILE=$hosted_file" >> "$GITHUB_ENV"
@@ -331,7 +339,7 @@ jobs:
           git rev-parse --verify -q 'HEAD^2' > /dev/null || decide full "checkout is not a merge commit; cannot tell what the PR changed"
           base=$(git rev-parse 'HEAD^1')
           if [ "$selfhosted" = 1 ]; then
-            data="$store/testmon/$(safe "$REPOSITORY")/$(safe "$BASE_REF")/$base.testmondata"
+            data="$store/testmon/$(safe "$REPOSITORY")/$(safe "$BASE_REF")/$key_dir/$base.testmondata"
             [ -s "$data" ] || decide full "no testmon data for base ${base:0:12} in ${data%/*} (none recorded, or recorded for another base commit)"
             origin="testmon data for base ${base:0:12}"
           else
@@ -461,7 +469,7 @@ jobs:
                 mkdir -p "${PYTEST_PUBLISH_FILE%/*}"
                 cp "$TESTMON_DATAFILE" "$PYTEST_PUBLISH_FILE.tmp.$$"
                 mv "$PYTEST_PUBLISH_FILE.tmp.$$" "$PYTEST_PUBLISH_FILE"
-                find "${PYTEST_PUBLISH_FILE%/*}" -maxdepth 1 -name '*.testmondata' ! -name "${PYTEST_PUBLISH_FILE##*/}" -delete
+                find "${PYTEST_PUBLISH_FILE%/*/*}" -name '*.testmondata' ! -path "$PYTEST_PUBLISH_FILE" -delete
                 echo "PYTEST_PUBLISHED=1" >> "$GITHUB_ENV"
                 summary "testmon data published: ${PYTEST_PUBLISH_FILE}"
               else
@@ -602,7 +610,8 @@ jobs:
           OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: ${{ vars.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT }}
           OTEL_SERVICE_NAME: ${{ vars.OTEL_SERVICE_NAME }}
           ESTATE_HOST_CLASS: ${{ vars.ESTATE_HOST_CLASS }}
-          OTELSPAN_HELPER_URL: https://raw.githubusercontent.com/rylee-bee-labs/ci-harness/main/scripts/otel-span.sh
+          OTELSPAN_HELPER_URL: https://raw.githubusercontent.com/rylee-bee-labs/ci-harness/0169f7367fe00aa525fe398aa87b040210b22e86/scripts/otel-span.sh
+          OTELSPAN_HELPER_SHA256: c28910154fb3a6b9b7aaf79a65b863acee7fd7b7fa905a1c0f2b4ffb375e81e8
           OTELSPAN_HELPER: ${{ runner.temp }}/otel-span.sh
           OTELSPAN_ENV_FILE: ${{ runner.temp }}/otel-ctx.env
           OTELSPAN_JOB_KEY: reusable-python:ruff
@@ -622,8 +631,9 @@ jobs:
           # fetch it from ci-harness otherwise.
           if [ -s "$GITHUB_WORKSPACE/scripts/otel-span.sh" ]; then
             cp "$GITHUB_WORKSPACE/scripts/otel-span.sh" "$OTELSPAN_HELPER"
-          elif ! curl -fsSL --max-time 15 "$OTELSPAN_HELPER_URL" -o "$OTELSPAN_HELPER"; then
-            echo "::notice::otel: span helper unavailable; telemetry stays off for this job"
+          elif ! curl -fsSL --max-time 15 "$OTELSPAN_HELPER_URL" -o "$OTELSPAN_HELPER" \
+            || ! echo "$OTELSPAN_HELPER_SHA256  $OTELSPAN_HELPER" | sha256sum -c -; then
+            echo "::notice::otel: span helper unavailable or failed its sha256 check; telemetry stays off for this job"
             rm -f "$OTELSPAN_HELPER"
           fi
           if [ -s "$OTELSPAN_HELPER" ]; then
@@ -729,7 +739,8 @@ jobs:
           OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: ${{ vars.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT }}
           OTEL_SERVICE_NAME: ${{ vars.OTEL_SERVICE_NAME }}
           ESTATE_HOST_CLASS: ${{ vars.ESTATE_HOST_CLASS }}
-          OTELSPAN_HELPER_URL: https://raw.githubusercontent.com/rylee-bee-labs/ci-harness/main/scripts/otel-span.sh
+          OTELSPAN_HELPER_URL: https://raw.githubusercontent.com/rylee-bee-labs/ci-harness/0169f7367fe00aa525fe398aa87b040210b22e86/scripts/otel-span.sh
+          OTELSPAN_HELPER_SHA256: c28910154fb3a6b9b7aaf79a65b863acee7fd7b7fa905a1c0f2b4ffb375e81e8
           OTELSPAN_HELPER: ${{ runner.temp }}/otel-span.sh
           OTELSPAN_ENV_FILE: ${{ runner.temp }}/otel-ctx.env
           OTELSPAN_JOB_KEY: reusable-python:bandit
@@ -749,8 +760,9 @@ jobs:
           # fetch it from ci-harness otherwise.
           if [ -s "$GITHUB_WORKSPACE/scripts/otel-span.sh" ]; then
             cp "$GITHUB_WORKSPACE/scripts/otel-span.sh" "$OTELSPAN_HELPER"
-          elif ! curl -fsSL --max-time 15 "$OTELSPAN_HELPER_URL" -o "$OTELSPAN_HELPER"; then
-            echo "::notice::otel: span helper unavailable; telemetry stays off for this job"
+          elif ! curl -fsSL --max-time 15 "$OTELSPAN_HELPER_URL" -o "$OTELSPAN_HELPER" \
+            || ! echo "$OTELSPAN_HELPER_SHA256  $OTELSPAN_HELPER" | sha256sum -c -; then
+            echo "::notice::otel: span helper unavailable or failed its sha256 check; telemetry stays off for this job"
             rm -f "$OTELSPAN_HELPER"
           fi
           if [ -s "$OTELSPAN_HELPER" ]; then
