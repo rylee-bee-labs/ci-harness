@@ -71,7 +71,7 @@ on:
           runner.tool_cache/busy-jobs (this job included), so four overlapping jobs on a
           6-CPU cap get 1 worker each and a lone job gets 6. Hosted runners: nproc. Opt in per
           repo only after its suite has passed in parallel (2026-10-10: agent-platform
-          633 s -> 173 s on 6 workers, all green). Type is string: quote numbers in the caller.
+          633 s -> 173 s on 6 workers, all green). Type is string: callers pass "6" (quoted) or "auto", never a bare 6.
         type: string
         required: false
         default: "0"
@@ -79,8 +79,8 @@ on:
         description: >-
           all (default) runs the whole suite. affected, on pull_request only, runs just the tests
           pytest-testmon says the PR touched, using testmon data recorded on the base branch
-          (self-hosted: a runner-local dir under runner.tool_cache; hosted runners have no data
-          store yet, so they run the full suite). Falls back to the FULL suite, and says why in
+          (self-hosted: a runner-local dir under runner.tool_cache; hosted: actions/cache, saved on
+          a push to the default branch and restored on the PR, see docs/CI-SPEED.md). Falls back to the FULL suite, and says why in
           the job summary, when there is no data, the data is for another base commit, the PR
           touches conftest.py, pyproject.toml, uv.lock, setup.cfg, pytest.ini, tox.ini or a
           .github/workflows file, or testmon selects zero tests although files changed. A push to
@@ -247,8 +247,30 @@ jobs:
           cache-dependency-glob: "**/uv.lock"
       - name: Sync locked dependencies
         run: uv sync --frozen ${{ inputs.sync-args }}
-      # junit-xml goes to RUNNER_TEMP (outside the workspace, so it cannot be committed or
-      # picked up by a repo's own globbing); the next two steps read it even when pytest failed.
+      # Hosted testmon store (pytest-select=affected only): runners are throwaway, so the data goes
+      # through actions/cache. A push to the default branch saves it under a key that ends in the
+      # commit sha; a pull_request restores the exact key of its base sha, else the newest entry
+      # with the same prefix. A stale entry is safe: testmon compares the current file fingerprints
+      # with the stored ones, so older data can only select MORE tests, never fewer. Nothing
+      # restored = the full suite. Self-hosted runners keep the runner-local store instead.
+      - name: Testmon cache key (hosted)
+        id: testmon-key
+        if: ${{ runner.environment == 'github-hosted' && inputs.pytest-select == 'affected' }}
+        shell: bash
+        env:
+          PROJECT_DIR: ${{ inputs.project-directory }}
+          KEY_PREFIX: testmon-${{ runner.os }}-${{ inputs.python-version }}
+        run: |
+          echo "prefix=$KEY_PREFIX-$(printf '%s' "$PROJECT_DIR" | sha256sum | cut -c1-16)-" >> "$GITHUB_OUTPUT"
+      - name: Restore testmon data (hosted, pull_request)
+        id: testmon-restore
+        if: ${{ runner.environment == 'github-hosted' && inputs.pytest-select == 'affected' && github.event_name == 'pull_request' }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/testmon-hosted/.testmondata
+          key: ${{ steps.testmon-key.outputs.prefix }}${{ github.event.pull_request.base.sha }}
+          restore-keys: |
+            ${{ steps.testmon-key.outputs.prefix }}
       # pytest-select=affected: decide, before running anything, whether this run may use testmon
       # data, and say which mode ran and why. Every doubt resolves to the full suite.
       - name: Select tests (full or affected)
@@ -261,6 +283,10 @@ jobs:
           BASE_REF: ${{ github.base_ref }}
           REPOSITORY: ${{ github.repository }}
           TOOL_CACHE: ${{ runner.tool_cache }}
+          PROJECT_DIR: ${{ inputs.project-directory }}
+          HOSTED_KEY_PREFIX: ${{ steps.testmon-key.outputs.prefix }}
+          HOSTED_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HOSTED_RESTORED_KEY: ${{ steps.testmon-restore.outputs.cache-matched-key }}
         run: |
           set -euo pipefail
           decide() {
@@ -279,32 +305,54 @@ jobs:
           [ "$PYTEST_SELECT" = affected ] || decide full "pytest-select=all"
 
           # Self-hosted runners keep testmon data per repo and base branch on the runner host.
-          # Hosted runners have no persistent store here, so their dir is always empty.
-          if [ "${RUNNER_ENVIRONMENT:-}" = self-hosted ]; then store="$TOOL_CACHE"; else store="$RUNNER_TEMP/hosted"; fi
+          # Hosted runners get one file, restored by actions/cache into $RUNNER_TEMP/testmon-hosted.
+          hosted_file="$RUNNER_TEMP/testmon-hosted/.testmondata"
+          [ "${RUNNER_ENVIRONMENT:-}" = self-hosted ] && selfhosted=1 || selfhosted=0
+          store="$TOOL_CACHE"
           work="$RUNNER_TEMP/testmon"
           rm -rf "$work"; mkdir -p "$work"
           echo "TESTMON_DATAFILE=$work/.testmondata" >> "$GITHUB_ENV"
 
           if [ "$EVENT_NAME" = push ] && [ "$REF_NAME" = "$DEFAULT_BRANCH" ]; then
-            echo "PYTEST_PUBLISH_FILE=$store/testmon/$(safe "$REPOSITORY")/$(safe "$REF_NAME")/$GITHUB_SHA.testmondata" >> "$GITHUB_ENV"
+            if [ "$selfhosted" = 1 ]; then
+              echo "PYTEST_PUBLISH_FILE=$store/testmon/$(safe "$REPOSITORY")/$(safe "$REF_NAME")/$GITHUB_SHA.testmondata" >> "$GITHUB_ENV"
+            else
+              # The Save step below uploads this file under the key ...-$GITHUB_SHA.
+              echo "PYTEST_PUBLISH_FILE=$hosted_file" >> "$GITHUB_ENV"
+            fi
             decide refresh "push to $DEFAULT_BRANCH: full suite, recording testmon data for $GITHUB_SHA"
           fi
           [ "$EVENT_NAME" = pull_request ] || decide full "event $EVENT_NAME is not a pull_request (affected mode is PR-only)"
 
           git rev-parse --verify -q 'HEAD^2' > /dev/null || decide full "checkout is not a merge commit; cannot tell what the PR changed"
           base=$(git rev-parse 'HEAD^1')
-          data="$store/testmon/$(safe "$REPOSITORY")/$(safe "$BASE_REF")/$base.testmondata"
-          [ -s "$data" ] || decide full "no testmon data for base ${base:0:12} in ${data%/*} (none recorded, or recorded for another base commit)"
+          if [ "$selfhosted" = 1 ]; then
+            data="$store/testmon/$(safe "$REPOSITORY")/$(safe "$BASE_REF")/$base.testmondata"
+            [ -s "$data" ] || decide full "no testmon data for base ${base:0:12} in ${data%/*} (none recorded, or recorded for another base commit)"
+            origin="testmon data for base ${base:0:12}"
+          else
+            data="$hosted_file"
+            [ -s "$data" ] || decide full "no testmon data restored from the actions cache for base ${base:0:12} (none saved yet, or evicted)"
+            if [ "$HOSTED_RESTORED_KEY" = "$HOSTED_KEY_PREFIX$HOSTED_BASE_SHA" ]; then
+              origin="testmon data for base ${base:0:12}"
+            else
+              origin="testmon data from an older base (${HOSTED_RESTORED_KEY:-unknown key}); stale data only selects more tests"
+            fi
+          fi
 
           changed=$(git diff --name-only 'HEAD^1' HEAD)
           trigger=$(printf '%s\n' "$changed" | grep -E '(^|/)(conftest\.py|pyproject\.toml|uv\.lock|setup\.cfg|pytest\.ini|tox\.ini)$|^\.github/workflows/' | head -n 3 | paste -sd, - || true)
           [ -z "$trigger" ] || decide full "PR touches test-wide config ($trigger)"
 
           cp "$data" "$work/.testmondata"
-          if [ -n "$(git diff --name-only 'HEAD^1' HEAD -- . ':!*.md')" ]; then
+          # Only files under the project directory count. The pathspec is anchored at the repo top
+          # because this step runs inside the project directory. Lockfile and pyproject changes
+          # already forced a full run above.
+          proj="${PROJECT_DIR#./}"; proj="${proj%/}"; [ "$proj" != . ] || proj=""
+          if [ -n "$(git diff --name-only 'HEAD^1' HEAD -- ":(top)$proj" ':(top,exclude)*.md')" ]; then
             echo "PYTEST_CHANGED_UNDER_PROJECT=1" >> "$GITHUB_ENV"
           fi
-          decide affected "testmon data for base ${base:0:12}; PR changes: $(printf '%s\n' "$changed" | wc -l) file(s)"
+          decide affected "$origin; PR changes: $(printf '%s\n' "$changed" | wc -l) file(s)"
       # junit-xml goes to RUNNER_TEMP (outside the workspace, so it cannot be committed or
       # picked up by a repo's own globbing); the next two steps read it even when pytest failed.
       - name: Run pytest
@@ -312,11 +360,12 @@ jobs:
           PYTEST_WORKERS: ${{ inputs.pytest-workers }}
           JUNIT_XML: ${{ runner.temp }}/pytest-junit.xml
           TOOL_CACHE: ${{ runner.tool_cache }}
-          LOCK_MAX_AGE_MIN: ${{ inputs.timeout-minutes }}
         run: |
           # Right-size workers. Self-hosted: join the busy-jobs lock dir for the life of this step
-          # (the trap leaves it on any exit; locks older than the job timeout are leftovers from a
-          # killed runner and are pruned). Count includes this job.
+          # (the trap leaves it on any exit). Locks older than GitHub's 360-minute job maximum are
+          # leftovers from a killed runner and are pruned: one fixed bound, because jobs sharing this
+          # dir have different timeout-minutes and must not delete each other's live locks. The lock
+          # records pid, run and start time so a stale one is recognisable. Count includes this job.
           CPU_MAX_FILE="${CPU_MAX_FILE:-/sys/fs/cgroup/cpu.max}"
           resolve_workers() {
             case "$PYTEST_WORKERS" in
@@ -349,9 +398,9 @@ jobs:
           if [ "${RUNNER_ENVIRONMENT:-}" = self-hosted ]; then
             LOCK_DIR="$TOOL_CACHE/busy-jobs"
             mkdir -p "$LOCK_DIR"
-            find "$LOCK_DIR" -maxdepth 1 -type f -mmin "+${LOCK_MAX_AGE_MIN:-30}" -delete 2>/dev/null || true
+            find "$LOCK_DIR" -maxdepth 1 -type f -mmin +360 -delete 2>/dev/null || true
             lock="$LOCK_DIR/${GITHUB_REPOSITORY//\//_}.${GITHUB_RUN_ID:-0}.${GITHUB_JOB:-job}.$$"
-            : > "$lock"
+            printf 'pid=%s run=%s attempt=%s job=%s started=%s\n' "$$" "${GITHUB_RUN_ID:-0}" "${GITHUB_RUN_ATTEMPT:-1}" "${GITHUB_JOB:-job}" "$(date -u +%FT%TZ)" > "$lock"
             trap 'rm -f "$lock"' EXIT
           fi
           resolve_workers
@@ -391,6 +440,10 @@ jobs:
               fi
               ;;
             refresh)
+              # Serial on purpose: pytest-testmon with xdist is only probed (informational) by the
+              # self-smoke affected-fixture job, not proven, and bad recorded data would make every
+              # later `affected` run select too little. A push to the default branch is rare, so
+              # the slower refresh is the cheaper risk. Switch to -n once that probe is proven.
               # Record while running everything. Publish only a green run with a non-empty db, so a
               # failing main never replaces good data, then drop older files for this branch.
               uv pip install --quiet "pytest-testmon>=2.1,<3"
@@ -400,6 +453,7 @@ jobs:
                 cp "$TESTMON_DATAFILE" "$PYTEST_PUBLISH_FILE.tmp.$$"
                 mv "$PYTEST_PUBLISH_FILE.tmp.$$" "$PYTEST_PUBLISH_FILE"
                 find "${PYTEST_PUBLISH_FILE%/*}" -maxdepth 1 -name '*.testmondata' ! -name "${PYTEST_PUBLISH_FILE##*/}" -delete
+                echo "PYTEST_PUBLISHED=1" >> "$GITHUB_ENV"
                 summary "testmon data published: ${PYTEST_PUBLISH_FILE}"
               else
                 summary "testmon wrote no data; nothing published."
@@ -407,6 +461,14 @@ jobs:
               ;;
             *) run_full ;;
           esac
+      # Only a green refresh run reaches here with PYTEST_PUBLISHED=1 (the Run pytest step failed
+      # otherwise). Keys are per commit, so a save never collides with an older entry.
+      - name: Save testmon data (hosted, push to default branch)
+        if: ${{ success() && runner.environment == 'github-hosted' && inputs.pytest-select == 'affected' && github.event_name == 'push' && github.ref_name == github.event.repository.default_branch && env.PYTEST_PUBLISHED == '1' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/testmon-hosted/.testmondata
+          key: ${{ steps.testmon-key.outputs.prefix }}${{ github.sha }}
       # Failing test names and short tracebacks only, written to the job summary so a red run
       # is readable without opening the raw log. Passing tests are never listed.
       - name: Pytest failures to job summary

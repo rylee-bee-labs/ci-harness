@@ -134,13 +134,17 @@ class AffectedSelectTest(unittest.TestCase):
         git(repo, "checkout", "-q", "--detach", "HEAD")
         return repo, base
 
-    def run_select(self, repo: Path, root: Path, base: str | None, **env: str) -> dict[str, str]:
+    def run_select(self, repo: Path, root: Path, base: str | None, cwd: str = ".", hosted_data: str | None = None,
+                   **env: str) -> dict[str, str]:
         tool, temp = root / "tool", root / "temp"
         temp.mkdir(exist_ok=True)
         if base:
             d = tool / "testmon" / "o" / "r" / "main"
             d.mkdir(parents=True, exist_ok=True)
             (d / f"{base}.testmondata").write_text("db")
+        if hosted_data is not None:  # what actions/cache/restore would have put there
+            (temp / "testmon-hosted").mkdir(exist_ok=True)
+            (temp / "testmon-hosted" / ".testmondata").write_text(hosted_data)
         genv, gsum = root / "genv", root / "gsum"
         genv.write_text("")
         gsum.write_text("")
@@ -148,8 +152,8 @@ class AffectedSelectTest(unittest.TestCase):
                 "RUNNER_TEMP": str(temp), "TOOL_CACHE": str(tool), "GITHUB_ENV": str(genv),
                 "GITHUB_STEP_SUMMARY": str(gsum), "GITHUB_SHA": "f" * 40, "PYTEST_SELECT": "affected",
                 "EVENT_NAME": "pull_request", "REF_NAME": "1/merge", "DEFAULT_BRANCH": "main",
-                "BASE_REF": "main", "REPOSITORY": "o/r", **env}
-        subprocess.run(["bash", "-c", self.script], cwd=repo, env=full, check=True, capture_output=True)
+                "BASE_REF": "main", "REPOSITORY": "o/r", "PROJECT_DIR": cwd, **env}
+        subprocess.run(["bash", "-c", self.script], cwd=repo / cwd, env=full, check=True, capture_output=True)
         out = dict(line.split("=", 1) for line in genv.read_text().splitlines())
         out["SUMMARY"] = gsum.read_text()
         return out
@@ -172,6 +176,47 @@ class AffectedSelectTest(unittest.TestCase):
     def test_markdown_only_pr_is_not_flagged_as_package_change(self) -> None:
         out = self.check({"README.md": "hi\n"}, "affected", "testmon data")
         self.assertNotIn("PYTEST_CHANGED_UNDER_PROJECT", out)
+
+    def test_change_outside_the_project_directory_is_not_a_project_change(self) -> None:
+        # The step runs inside the project directory (here pkg/); a code change elsewhere must not count.
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            repo, base = self.make_pr(root, {"other/b.py": "y = 2\n"})
+            out = self.run_select(repo, root, base, cwd="pkg")
+            self.assertEqual(out["PYTEST_MODE"], "affected")
+            self.assertNotIn("PYTEST_CHANGED_UNDER_PROJECT", out)
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            repo, base = self.make_pr(root, {"other/b.py": "y = 2\n", "pkg/a.py": "x = 2\n"})
+            out = self.run_select(repo, root, base, cwd="pkg")
+            self.assertEqual(out["PYTEST_CHANGED_UNDER_PROJECT"], "1")
+
+    def test_hosted_uses_restored_cache_file(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            repo, base = self.make_pr(root, {"pkg/a.py": "x = 2\n"})
+            prefix = "testmon-Linux-3.12-abc-"
+            hosted = dict(RUNNER_ENVIRONMENT="github-hosted", HOSTED_KEY_PREFIX=prefix, hosted_data="db")
+            out = self.run_select(repo, root, None, HOSTED_BASE_SHA=base, HOSTED_RESTORED_KEY=prefix + base, **hosted)
+            self.assertEqual(out["PYTEST_MODE"], "affected")
+            self.assertIn(f"testmon data for base {base[:12]}", out["PYTEST_MODE_REASON"])
+        with tempfile.TemporaryDirectory() as d:  # prefix fallback: stale but usable
+            root = Path(d)
+            repo, base = self.make_pr(root, {"pkg/a.py": "x = 2\n"})
+            out = self.run_select(repo, root, None, HOSTED_BASE_SHA=base, HOSTED_RESTORED_KEY=prefix + "1" * 40, **hosted)
+            self.assertEqual(out["PYTEST_MODE"], "affected")
+            self.assertIn("older base", out["PYTEST_MODE_REASON"])
+        with tempfile.TemporaryDirectory() as d:  # nothing restored: full suite
+            root = Path(d)
+            repo, base = self.make_pr(root, {"pkg/a.py": "x = 2\n"})
+            out = self.run_select(repo, root, None, RUNNER_ENVIRONMENT="github-hosted")
+            self.assertEqual(out["PYTEST_MODE"], "full")
+            self.assertIn("no testmon data restored", out["PYTEST_MODE_REASON"])
+
+    def test_hosted_push_refresh_targets_the_cache_path(self) -> None:
+        out = self.check({"pkg/a.py": "x = 2\n"}, "refresh", "recording testmon data",
+                         EVENT_NAME="push", REF_NAME="main", RUNNER_ENVIRONMENT="github-hosted")
+        self.assertTrue(out["PYTEST_PUBLISH_FILE"].endswith("/testmon-hosted/.testmondata"))
 
     def test_no_data_falls_back_to_full(self) -> None:
         self.check({"pkg/a.py": "x = 2\n"}, "full", "no testmon data", base_ok=False)
@@ -230,7 +275,8 @@ class AffectedRunTest(unittest.TestCase):
         publish = root / "pub" / "x.testmondata"
         env = {"PATH": f"{root / 'bin'}:/usr/bin:/bin", "GITHUB_STEP_SUMMARY": str(gsum), "JUNIT_XML": str(root / "j.xml"),
                "PYTEST_MODE": mode, "PYTEST_WORKERS": workers, "TESTMON_DATAFILE": str(root / "db"),
-               "PYTEST_PUBLISH_FILE": str(publish), "PYTEST_CHANGED_UNDER_PROJECT": changed}
+               "PYTEST_PUBLISH_FILE": str(publish), "PYTEST_CHANGED_UNDER_PROJECT": changed,
+               "GITHUB_ENV": str(root / "genv")}
         self.proc = subprocess.run(["bash", "-e", "-c", self.script.replace("${{ inputs.pytest-args }}", "-q")],
                                    env=env, capture_output=True, text=True)
         return log.read_text(), gsum.read_text(), publish, root
@@ -274,8 +320,9 @@ class AffectedRunTest(unittest.TestCase):
         self.assertNotIn(" -n ", log)
 
     def test_refresh_publishes_only_green_runs(self) -> None:
-        _, _, publish, _ = self.run_step("refresh", 0)
+        _, _, publish, root = self.run_step("refresh", 0)
         self.assertTrue(publish.exists())
+        self.assertIn("PYTEST_PUBLISHED=1", (root / "genv").read_text())  # gates the hosted cache save
         _, _, publish, _ = self.run_step("refresh", 1)
         self.assertFalse(publish.exists())
 
@@ -306,7 +353,7 @@ class WorkerSizingTest(unittest.TestCase):
             (tool_cache / "busy-jobs" / f"other.{i}").write_text("")
         env = {"PATH": f"{root / 'bin'}:/usr/bin:/bin", "GITHUB_STEP_SUMMARY": str(gsum), "JUNIT_XML": str(root / "j.xml"),
                "PYTEST_WORKERS": workers, "TOOL_CACHE": str(tool_cache), "CPU_MAX_FILE": str(cpu),
-               "GITHUB_REPOSITORY": "o/r", "GITHUB_RUN_ID": "7", "GITHUB_JOB": "test", "LOCK_MAX_AGE_MIN": "30"}
+               "GITHUB_REPOSITORY": "o/r", "GITHUB_RUN_ID": "7", "GITHUB_JOB": "test"}
         if not hosted:
             env["RUNNER_ENVIRONMENT"] = "self-hosted"
         self.proc = subprocess.run(["bash", "-e", "-c", self.script.replace("${{ inputs.pytest-args }}", "-q")],
@@ -326,6 +373,33 @@ class WorkerSizingTest(unittest.TestCase):
         self.assertEqual(self.workers(cpu_max="max 100000"), 8)              # nproc=16, clamped to 8
         self.assertEqual(self.workers(cpu_max=None), 8)                      # no cpu.max: nproc, clamped
         self.assertEqual(self.workers(cpu_max="1600000 100000"), 8)
+
+    def test_prune_bound_is_fixed_and_lock_names_its_owner(self) -> None:
+        import os
+        import time
+        self.run_auto(cpu_max="600000 100000", locks=2)
+        self.assertEqual(self.proc.returncode, 0, self.proc.stderr)
+        self.assertNotIn("LOCK_MAX_AGE_MIN", self.script)
+        self.assertIn("-mmin +360", self.script)
+        # A 40-minute-old lock (longer than a 30 minute job timeout) from another job must survive;
+        # one older than 360 minutes is pruned. While running, our own lock holds pid and run id.
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        locks = Path(d.name) / "busy-jobs"
+        locks.mkdir()
+        for name, age in (("live", 40), ("dead", 400)):
+            f = locks / name
+            f.write_text("")
+            os.utime(f, (time.time() - age * 60,) * 2)
+        script = self.script.replace("resolve_workers\n", 'cat "$lock" >> "$OUT"; resolve_workers\n', 1)
+        env = {"PATH": "/usr/bin:/bin:" + str(Path(d.name)), "PYTEST_WORKERS": "0", "TOOL_CACHE": d.name, "OUT": str(Path(d.name) / "out"),
+               "RUNNER_ENVIRONMENT": "self-hosted", "GITHUB_REPOSITORY": "o/r", "GITHUB_RUN_ID": "77", "JUNIT_XML": "j.xml",
+               "GITHUB_STEP_SUMMARY": "/dev/null"}
+        (Path(d.name) / "uv").write_text("#!/bin/bash\n")
+        (Path(d.name) / "uv").chmod(0o755)
+        subprocess.run(["bash", "-e", "-c", script.replace("${{ inputs.pytest-args }}", "-q")], env=env, check=True, capture_output=True)
+        self.assertEqual(sorted(p.name for p in locks.iterdir()), ["live"])
+        self.assertRegex((Path(d.name) / "out").read_text(), r"pid=\d+ run=77 ")
 
     def test_hosted_uses_nproc(self) -> None:
         self.assertEqual(self.workers(cpu_max="600000 100000", hosted=True), 16)
@@ -349,6 +423,8 @@ class WorkerSizingTest(unittest.TestCase):
         block = self.text.split("      pytest-workers:\n", 1)[1].split("      pytest-select:", 1)[0]
         self.assertIn('default: "0"', block)
         self.assertIn("max(1, min(cap_cores, 8) // max(1, busy_jobs))", block)
+        self.assertIn("type: string", block)  # callers pass "6" or "auto", both strings
+        self.assertIn('never a bare 6', block)
 
 
 class CacheTest(unittest.TestCase):
@@ -376,10 +452,32 @@ class CacheTest(unittest.TestCase):
 
     def test_venv_and_node_modules_are_never_cached(self) -> None:
         for text in (self.py, self.node):
-            self.assertNotIn("actions/cache", text)
+            for path in re.findall(r"uses: actions/cache(?:/\w+)?@\S+.*\n(?:          .*\n)*?          path: (.*)\n", text):
+                self.assertNotRegex(path, r"\.venv|node_modules", path)
             for line in text.splitlines():
                 if re.search(r"(UV_CACHE_DIR|npm_config_cache|CACHE_DIR)\b", line) and not line.lstrip().startswith("#"):
                     self.assertNotRegex(line, r"\.venv|node_modules", line)
+
+    def test_hosted_testmon_cache_saves_on_default_branch_push_and_restores_on_prs(self) -> None:
+        sha = "55cc8345863c7cc4c66a329aec7e433d2d1c52a9"
+        self.assertIn(f"uses: actions/cache/save@{sha} # v6.1.0", self.py)
+        self.assertIn(f"uses: actions/cache/restore@{sha} # v6.1.0", self.py)
+        self.assertEqual(len(re.findall(r"uses: actions/cache", self.py)), 2)
+        self.assertIn(sha, (WF.parent.parent / "pins" / "ACTIONS.md").read_text())
+        save = self.py.split("name: Save testmon data", 1)[1].split("\n      # ", 1)[0]
+        for cond in ("runner.environment == 'github-hosted'", "github.event_name == 'push'",
+                     "github.ref_name == github.event.repository.default_branch", "success()"):
+            self.assertIn(cond, save)
+        self.assertNotIn("pull_request", save)
+        self.assertIn("key: ${{ steps.testmon-key.outputs.prefix }}${{ github.sha }}", save)
+        restore = self.py.split("name: Restore testmon data", 1)[1].split("\n      # ", 1)[0]
+        self.assertIn("github.event_name == 'pull_request'", restore)
+        self.assertNotIn("'push'", restore)
+        self.assertIn("${{ github.event.pull_request.base.sha }}", restore)
+        self.assertRegex(restore, r"restore-keys: \|\n\s+\$\{\{ steps.testmon-key.outputs.prefix \}\}$")
+        key = self.py.split("name: Testmon cache key", 1)[1].split("\n      - name:", 1)[0]
+        self.assertIn("testmon-${{ runner.os }}-${{ inputs.python-version }}", key)
+        self.assertIn("sha256sum", key)  # project-directory hash
 
     def test_no_unpinned_actions_were_added(self) -> None:
         for path in TEMPLATES:
@@ -416,10 +514,6 @@ class SecretScanTest(unittest.TestCase):
         self.assertIn("fetch-depth: 0", sc)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class HostedUvCacheTest(unittest.TestCase):
     def test_hosted_runners_use_pinned_setup_uv_cache(self) -> None:
         text = read("reusable-python.yml")
@@ -428,3 +522,8 @@ class HostedUvCacheTest(unittest.TestCase):
         self.assertEqual(text.count("if: ${{ runner.environment == 'github-hosted' }}"), jobs)
         self.assertEqual(text.count("enable-cache: true"), jobs)
         self.assertIn("astral-sh/setup-uv", (WF.parent.parent / "pins" / "ACTIONS.md").read_text())
+
+
+if __name__ == "__main__":
+    unittest.main()
+

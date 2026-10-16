@@ -188,7 +188,7 @@ jobs:
           fi
       # Self-hosted runners share one uv cache and one npm cache per runner host, outside every
       # workspace (never .venv or node_modules). Both caches are safe for concurrent use.
-      # Hosted runners use setup-node's own npm cache below; setup-uv's is not pinned yet.
+      # Hosted runners use setup-node's own npm cache below (reusable-python uses the pinned setup-uv cache).
       - name: Warm dependency caches (self-hosted runner-local dirs)
         if: ${{ runner.environment == 'self-hosted' }}
         shell: bash
