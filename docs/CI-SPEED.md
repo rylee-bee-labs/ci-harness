@@ -48,8 +48,25 @@ Default is `all`.
 - Hosted runners: `nproc`, no lock dir.
 - 6-CPU cap: 1 job gets 6, 2 get 3, 3 get 2, 4 or more get 1. Jobs that overlap by a few seconds
   can both count each other and run under-sized; they never over-subscribe.
-- The default is still `0` (serial). The input is now a string; a caller passing a bare number
-  should quote it (`pytest-workers: "6"`).
+- The default is still `0` (serial).
+
+### Callers must quote `pytest-workers`
+
+`pytest-workers` is a **string** input, because `auto` is not a number. GitHub validates every
+value in a caller's `with:` block against the declared input type, and `6` in YAML is an integer,
+not a string: a bare `pytest-workers: 6` is rejected as a type error before any job runs — the
+caller's workflow does not start, so it looks like a broken pin rather than a quoting mistake.
+Always write it quoted:
+
+```yaml
+      pytest-workers: "6"        # correct: a string, 6 workers
+      pytest-workers: auto        # also correct: bare auto is already a string
+      # pytest-workers: 6        # wrong: YAML int, rejected as a string input
+```
+
+ci-harness's own callers (self-smoke.yml) pass no value today and take the `"0"` default.
+`tests/test_workflow_contracts.py::CallerQuotingTest` fails if any workflow in this repo passes a
+bare number for it.
 
 ## Warm dependency caches
 

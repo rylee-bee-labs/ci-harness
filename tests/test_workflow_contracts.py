@@ -379,6 +379,33 @@ class WorkerSizingTest(unittest.TestCase):
         self.assertIn("max(1, min(cap_cores, 8) // max(1, busy_jobs))", block)
 
 
+class CallerQuotingTest(unittest.TestCase):
+    """`pytest-workers` is a string input: a caller's bare number is a YAML int and is rejected."""
+
+    def test_no_workflow_passes_an_unquoted_numeric_pytest_workers(self) -> None:
+        for path in sorted(WF.glob("*.yml")):
+            for line in path.read_text().splitlines():
+                m = re.match(r"^ +pytest-workers:\s*(.*)$", line)
+                if not m:
+                    continue  # the template's own input declaration, whose value is on later lines
+                value = m.group(1).split(" #")[0].strip()
+                ok = value in ("", "auto") or value.startswith(('"', "${{"))
+                self.assertTrue(ok, f"{path.name}: pytest-workers: {value} — quote it: "
+                                     f'pytest-workers: "{value}"')
+
+    def test_the_template_declares_it_string_with_a_quoted_default(self) -> None:
+        block = read("reusable-python.yml").split("      pytest-workers:\n", 1)[1]
+        block = block.split("      pytest-select:", 1)[0]
+        self.assertIn("type: string", block)
+        self.assertIn('default: "0"', block)
+
+    def test_the_doc_says_so_and_gives_the_reason(self) -> None:
+        doc = (Path(__file__).resolve().parent.parent / "docs" / "CI-SPEED.md").read_text()
+        self.assertIn('pytest-workers: "6"', doc)
+        self.assertIn("pytest-workers: 6", doc)  # the wrong form, shown as wrong
+        self.assertIn("string", doc)
+
+
 class CacheTest(unittest.TestCase):
     py = read("reusable-python.yml")
     node = read("reusable-node.yml")
