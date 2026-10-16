@@ -35,7 +35,9 @@ on:
         required: false
         default: "3.12"
       uv-version:
-        description: Exact uv version bootstrapped via pip.
+        description: >-
+          Exact uv version installed in every job: by the pinned astral-sh/setup-uv on hosted
+          runners, by pip on self-hosted ones.
         type: string
         required: false
         default: "0.11.28"
@@ -79,8 +81,9 @@ on:
         description: >-
           all (default) runs the whole suite. affected, on pull_request only, runs just the tests
           pytest-testmon says the PR touched, using testmon data recorded on the base branch
-          (self-hosted: a runner-local dir under runner.tool_cache; hosted runners have no data
-          store yet, so they run the full suite). Falls back to the FULL suite, and says why in
+          (self-hosted: a runner-local dir under runner.tool_cache; hosted: an actions/cache entry
+          keyed on repository, base branch and base sha, written by the push to the default
+          branch). Falls back to the FULL suite, and says why in
           the job summary, when there is no data, the data is for another base commit, the PR
           touches conftest.py, pyproject.toml, uv.lock, setup.cfg, pytest.ini, tox.ini or a
           .github/workflows file, or testmon selects zero tests although files changed. A push to
@@ -218,7 +221,8 @@ jobs:
           fi
       # Self-hosted runners share one uv cache per runner host (uv's cache is safe for concurrent
       # use), so a job's `uv sync` is mostly hardlinks. Only the cache is shared: never .venv.
-      # Hosted runners keep uv's default cache dir (setup-uv's cache is not pinned yet; docs/CI-SPEED.md).
+      # Hosted runners use setup-uv's own cache (pinned below); self-hosted must not, because
+      # UV_CACHE_DIR above is one dir shared by every repo on that host.
       - name: Warm uv cache (self-hosted runner-local dir)
         if: ${{ runner.environment == 'self-hosted' }}
         shell: bash
@@ -234,10 +238,45 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ inputs.python-version }}
-      - name: Bootstrap uv
+      # Hosted: uv from the pinned action, whose cache is keyed on this repo's uv.lock.
+      # Self-hosted: the same uv version from PyPI into the already-warm runner-local cache.
+      # Exactly one of the two runs, so uv is never installed twice.
+      - name: Set up uv (hosted, cached by uv.lock)
+        if: ${{ runner.environment == 'github-hosted' }}
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: ${{ inputs.uv-version }}
+          enable-cache: true
+          cache-dependency-glob: ${{ inputs.project-directory == '.' && 'uv.lock' || format('{0}/uv.lock', inputs.project-directory) }}
+      - name: Bootstrap uv (self-hosted)
+        if: ${{ runner.environment == 'self-hosted' }}
         run: pip install uv==${{ inputs.uv-version }}
       - name: Sync locked dependencies
         run: uv sync --frozen ${{ inputs.sync-args }}
+      # Hosted runners have no runner-local store, so the testmon data for a PR's base branch
+      # travels through actions/cache: the push to the default branch saves it under a key built
+      # from the base branch and that commit's sha, and a PR restores exactly that key (older data
+      # for the same branch is the prefix fallback, which the select step below ignores unless the
+      # file it needs is really there). The repository is in every key, so one repo's testmon data
+      # can never be restored into another repo's job. Self-hosted keeps the runner-local
+      # <tool_cache>/testmon path and neither step runs there.
+      - name: Restore testmon data for this base branch (hosted)
+        if: ${{ runner.environment == 'github-hosted' && github.event_name == 'pull_request' }}
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          # Same shape the select step below reads: owner, repo and branch flattened to one
+          # path segment each (github.repository_name_owner / base_ref_name are the slash-free
+          # forms of what it builds with safe()).
+          path: ${{ runner.temp }}/hosted/testmon/${{ github.repository_name_owner }}/${{ github.base_ref_name }}
+          key: testmon-v1-${{ github.repository }}-${{ github.base_ref_name }}-${{ github.event.pull_request.base.sha }}
+          restore-keys: |
+            testmon-v1-${{ github.repository }}-${{ github.base_ref_name }}-
+      - name: Save testmon data for the default branch (hosted)
+        if: ${{ runner.environment == 'github-hosted' && github.event_name == 'push' && github.ref_name == github.event.repository.default_branch && success() }}
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ${{ runner.temp }}/hosted/testmon/${{ github.repository_name_owner }}/${{ github.ref_name }}
+          key: testmon-v1-${{ github.repository }}-${{ github.ref_name }}-${{ github.sha }}
       # junit-xml goes to RUNNER_TEMP (outside the workspace, so it cannot be committed or
       # picked up by a repo's own globbing); the next two steps read it even when pytest failed.
       # pytest-select=affected: decide, before running anything, whether this run may use testmon
@@ -545,7 +584,8 @@ jobs:
           fi
       # Self-hosted runners share one uv cache per runner host (uv's cache is safe for concurrent
       # use), so a job's `uv sync` is mostly hardlinks. Only the cache is shared: never .venv.
-      # Hosted runners keep uv's default cache dir (setup-uv's cache is not pinned yet; docs/CI-SPEED.md).
+      # Hosted runners use setup-uv's own cache (pinned below); self-hosted must not, because
+      # UV_CACHE_DIR above is one dir shared by every repo on that host.
       - name: Warm uv cache (self-hosted runner-local dir)
         if: ${{ runner.environment == 'self-hosted' }}
         shell: bash
@@ -561,7 +601,18 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ inputs.python-version }}
-      - name: Bootstrap uv
+      # Hosted: uv from the pinned action, whose cache is keyed on this repo's uv.lock.
+      # Self-hosted: the same uv version from PyPI into the already-warm runner-local cache.
+      # Exactly one of the two runs, so uv is never installed twice.
+      - name: Set up uv (hosted, cached by uv.lock)
+        if: ${{ runner.environment == 'github-hosted' }}
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: ${{ inputs.uv-version }}
+          enable-cache: true
+          cache-dependency-glob: ${{ inputs.project-directory == '.' && 'uv.lock' || format('{0}/uv.lock', inputs.project-directory) }}
+      - name: Bootstrap uv (self-hosted)
+        if: ${{ runner.environment == 'self-hosted' }}
         run: pip install uv==${{ inputs.uv-version }}
       - name: Sync locked dependencies
         run: uv sync --frozen ${{ inputs.sync-args }}
@@ -663,7 +714,8 @@ jobs:
           fi
       # Self-hosted runners share one uv cache per runner host (uv's cache is safe for concurrent
       # use), so a job's `uv sync` is mostly hardlinks. Only the cache is shared: never .venv.
-      # Hosted runners keep uv's default cache dir (setup-uv's cache is not pinned yet; docs/CI-SPEED.md).
+      # Hosted runners use setup-uv's own cache (pinned below); self-hosted must not, because
+      # UV_CACHE_DIR above is one dir shared by every repo on that host.
       - name: Warm uv cache (self-hosted runner-local dir)
         if: ${{ runner.environment == 'self-hosted' }}
         shell: bash
@@ -679,7 +731,18 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ inputs.python-version }}
-      - name: Bootstrap uv
+      # Hosted: uv from the pinned action, whose cache is keyed on this repo's uv.lock.
+      # Self-hosted: the same uv version from PyPI into the already-warm runner-local cache.
+      # Exactly one of the two runs, so uv is never installed twice.
+      - name: Set up uv (hosted, cached by uv.lock)
+        if: ${{ runner.environment == 'github-hosted' }}
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: ${{ inputs.uv-version }}
+          enable-cache: true
+          cache-dependency-glob: ${{ inputs.project-directory == '.' && 'uv.lock' || format('{0}/uv.lock', inputs.project-directory) }}
+      - name: Bootstrap uv (self-hosted)
+        if: ${{ runner.environment == 'self-hosted' }}
         run: pip install uv==${{ inputs.uv-version }}
       - name: Sync locked dependencies
         run: uv sync --frozen ${{ inputs.sync-args }}

@@ -17,16 +17,24 @@ Default is `all`.
 - **xdist.** testmon runs are serial: `pytest-workers` is ignored in `affected` and refresh
   modes. The self-smoke job `affected-fixture` probes xdist + testmon and prints whether it works
   there; the template does not depend on it.
-- **Hosted runners** have no testmon store yet (see Open items), so `affected` there always falls
-  back to the full suite and says "no testmon data".
+- **Hosted runners** have no runner-local store, so the data travels through `actions/cache`
+  (pinned in `pins/ACTIONS.md`):
+  - a PR restores `testmon-v1-<repo>-<base branch>-<base sha>`, with the branch prefix as a
+    fallback, from `<runner.temp>/hosted/testmon/<owner>/<base branch>`;
+  - a green push to the default branch saves the same directory under
+    `testmon-v1-<repo>-<default branch>-<sha>`;
+  - the repository is in every key, so no repo ever reads another's data, and the fallback only
+    helps when the file the select step needs is really there — otherwise it says "no testmon data
+    for base <sha>" and runs the full suite. On a cold cache a PR gets one `Path Validation Error`
+    warning from the cache action (nothing to restore, nothing to save) and the full suite.
 - testmon tracks Python files. A PR that changes only data files a test reads can be skipped by
   testmon; put such paths in the fallback list if a repo needs it.
 
 ## Open items
 
-- Hosted-runner caching needs `astral-sh/setup-uv` and `actions/cache` pinned by SHA in
-  `pins/ACTIONS.md`. The SHAs must be resolved with `git ls-remote` (bump protocol) and could not
-  be here (no network), so they are not added. Nothing was guessed.
+- Hosted testmon data accumulates one cache entry per push to the default branch (the key carries
+  the sha). GitHub expires them, but a repo that wants fewer entries can keep its own history
+  short; nothing depends on the old entries.
 
 ## pytest-workers: auto
 
@@ -49,7 +57,10 @@ Default is `all`.
   (every Python job, and reusable-node when `setup-python` is on) and
   `npm_config_cache=<runner.tool_cache>/npm-cache` (reusable-node). One dir per runner host, shared by
   all jobs; both tools are safe for concurrent use. A dir that cannot be created or written
-  produces a warning and the tool's default cache.
-- **Hosted**: reusable-node uses setup-node's `cache: npm` (keyed on the package-lock.json under
-  `working-directory`). reusable-python keeps uv's default cache: see Open items.
-- `.venv` and `node_modules` are never cached or shared; a contract test enforces it.
+  produces a warning and the tool's default cache. uv is installed with `pip install uv==<pin>` here.
+- **Hosted**: reusable-python uses `astral-sh/setup-uv` with `enable-cache: true`, keyed on the
+  `uv.lock` under `project-directory`; reusable-node uses setup-node's `cache: npm` (keyed on the
+  package-lock.json under `working-directory`). Both actions are pinned by full SHA in
+  `pins/ACTIONS.md`.
+- `.venv` and `node_modules` are never cached or shared; a contract test enforces it, and every
+  cache key names its repository so no two repos share an entry.

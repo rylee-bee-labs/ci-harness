@@ -142,6 +142,13 @@ def step_script(text: str, name: str) -> str:
     return "".join(line[10:] if line.strip() else "\n" for line in m.group(1).splitlines(True))
 
 
+def step_block(text: str, name: str) -> str:
+    """The whole step called `name`, from its `- name:` line up to the next step."""
+    m = re.search(rf"      - name: {re.escape(name)}\n(?:[ ]*#.*\n|        .*\n|\n)*?(?=^      - |\Z)", text, re.M)
+    assert m, name
+    return m.group(0)
+
+
 def git(cwd: Path, *args: str) -> str:
     env = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t",
            "GIT_COMMITTER_EMAIL": "t@t", "PATH": "/usr/bin:/bin", "HOME": str(cwd)}
@@ -396,10 +403,59 @@ class CacheTest(unittest.TestCase):
 
     def test_venv_and_node_modules_are_never_cached(self) -> None:
         for text in (self.py, self.node):
-            self.assertNotIn("actions/cache", text)
             for line in text.splitlines():
-                if re.search(r"(UV_CACHE_DIR|npm_config_cache|CACHE_DIR)\b", line) and not line.lstrip().startswith("#"):
+                if re.search(r"(UV_CACHE_DIR|npm_config_cache|CACHE_DIR|cache-dependency-glob|^ *(path|key):)\b", line) \
+                        and not line.lstrip().startswith("#"):
                     self.assertNotRegex(line, r"\.venv|node_modules", line)
+
+    def test_the_only_cache_action_keys_name_the_repository_never_a_venv(self) -> None:
+        # actions/cache exists now, for testmon data on hosted runners only. Every use of it
+        # must key on the repository (one repo's data never lands in another repo's job) and
+        # must not name .venv, which is per-checkout state, not a cache.
+        blocks = [step_block(self.py, name) for name in
+                  ("Restore testmon data for this base branch (hosted)",
+                   "Save testmon data for the default branch (hosted)")]
+        self.assertEqual(self.py.count("actions/cache@"), len(blocks))
+        for block in blocks:
+            self.assertRegex(block, r"uses: actions/cache@[0-9a-f]{40} # v6", block)
+            key = re.search(r"^ +key: (.+)$", block, re.M).group(1)
+            self.assertIn("${{ github.repository }}-", key)
+            self.assertNotIn(".venv", block)
+
+    def test_hosted_uv_is_the_pinned_setup_uv_with_its_cache(self) -> None:
+        sha = "astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7"  # v10.2.0
+        uv = step_block(self.py, "Set up uv (hosted, cached by uv.lock)")
+        self.assertEqual(self.py.count(sha), 3)  # test, ruff, bandit: one per job
+        self.assertIn("if: ${{ runner.environment == 'github-hosted' }}", uv)
+        self.assertIn("enable-cache: true", uv)
+        self.assertIn("uv.lock", uv)  # the cache key follows this repo's lockfile
+        self.assertIn("version: ${{ inputs.uv-version }}", uv)
+        for block in self.py.split("\n    steps:\n")[1:]:
+            # uv is installed once per job: hosted by the action, self-hosted by pip.
+            self.assertIn("pip install uv==${{ inputs.uv-version }}", block)
+            self.assertIn("if: ${{ runner.environment == 'self-hosted' }}", block)
+            self.assertLess(block.index(sha), block.index("uv sync --frozen"))
+
+    def test_testmon_data_rides_the_cache_on_hosted_and_only_there(self) -> None:
+        sha = "actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9"  # v6
+        restore = step_block(self.py, "Restore testmon data for this base branch (hosted)")
+        save = step_block(self.py, "Save testmon data for the default branch (hosted)")
+        for block in (restore, save):
+            self.assertIn(sha, block)
+            self.assertIn("if: ${{ runner.environment == 'github-hosted' &&", block)
+            self.assertIn("${{ runner.temp }}/hosted/testmon/${{ github.repository_name_owner }}", block)
+        # A PR restores the base branch's data for the base sha...
+        self.assertIn("key: testmon-v1-${{ github.repository }}-${{ github.base_ref_name }}-${{ github.event.pull_request.base.sha }}", restore)
+        self.assertIn("restore-keys: |\n            testmon-v1-${{ github.repository }}-${{ github.base_ref_name }}-", restore)
+        # ...and a push to the default branch refreshes it under its own sha.
+        self.assertIn("key: testmon-v1-${{ github.repository }}-${{ github.ref_name }}-${{ github.sha }}", save)
+        self.assertIn("github.event_name == 'push'", save)
+        self.assertIn("github.ref_name == github.event.repository.default_branch", save)
+        self.assertIn("success()", save)
+        # The self-hosted store is untouched: still the runner-local tool_cache, no actions/cache.
+        select = step_script(self.py, "Select tests (full or affected)")
+        self.assertIn('store="$TOOL_CACHE"', select)
+        self.assertNotIn("actions/cache", select)
 
     def test_no_unpinned_actions_were_added(self) -> None:
         for path in TEMPLATES:
