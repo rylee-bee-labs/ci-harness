@@ -342,7 +342,9 @@ jobs:
             fi
           fi
 
-          changed=$(git diff --name-only 'HEAD^1' HEAD)
+          # --no-renames: a rename lists both paths, so a file moved into the project, or a renamed
+          # conftest.py, is judged by its old path too.
+          changed=$(git diff --name-only --no-renames 'HEAD^1' HEAD)
           trigger=$(printf '%s\n' "$changed" | grep -E '(^|/)(conftest\.py|pyproject\.toml|uv\.lock|setup\.cfg|pytest\.ini|tox\.ini)$|^\.github/workflows/' | head -n 3 | paste -sd, - || true)
           [ -z "$trigger" ] || decide full "PR touches test-wide config ($trigger)"
 

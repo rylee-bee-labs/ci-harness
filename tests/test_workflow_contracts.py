@@ -162,20 +162,27 @@ class AffectedSelectTest(unittest.TestCase):
     text = read("reusable-python.yml")
     script = step_script(text, "Select tests (full or affected)")
 
-    def make_pr(self, root: Path, changed: dict[str, str]) -> tuple[Path, str]:
+    def make_pr(self, root: Path, changed: dict[str, str], base_files: dict[str, str] | None = None,
+                renamed: dict[str, str] | None = None, removed: tuple[str, ...] = ()) -> tuple[Path, str]:
         repo = root / "repo"
         repo.mkdir()
         git(repo, "init", "-q", "-b", "main")
-        (repo / "pkg").mkdir()
-        (repo / "pkg" / "a.py").write_text("x = 1\n")
+        for name, body in {"pkg/a.py": "x = 1\n", **(base_files or {})}.items():
+            (repo / name).parent.mkdir(parents=True, exist_ok=True)
+            (repo / name).write_text(body)
         git(repo, "add", ".")
         git(repo, "commit", "-qm", "base")
         base = git(repo, "rev-parse", "HEAD")
         git(repo, "checkout", "-qb", "pr")
+        for old, new in (renamed or {}).items():
+            (repo / new).parent.mkdir(parents=True, exist_ok=True)
+            git(repo, "mv", old, new)
+        for name in removed:
+            git(repo, "rm", "-q", name)
         for name, body in changed.items():
             (repo / name).parent.mkdir(parents=True, exist_ok=True)
             (repo / name).write_text(body)
-        git(repo, "add", ".")
+        git(repo, "add", "-A")
         git(repo, "commit", "-qm", "pr")
         git(repo, "checkout", "-q", "main")
         git(repo, "merge", "-q", "--no-ff", "-m", "merge", "pr")
@@ -242,6 +249,34 @@ class AffectedSelectTest(unittest.TestCase):
                 out = self.run_select(repo, root, base, cwd="pkg")
                 self.assertEqual(out["PYTEST_MODE"], "full", out)
                 self.assertIn("other/b.py", out["PYTEST_MODE_REASON"])
+
+    def test_rename_is_judged_by_both_paths(self) -> None:
+        # Python moved into the project from outside, and a data file renamed to .py, both run full.
+        for base_files, renamed, want in (({"other/util.py": "u = 1\n"}, {"other/util.py": "pkg/util.py"}, "other/util.py"),
+                                          ({"pkg/data.json": "{}\n"}, {"pkg/data.json": "pkg/data.py"}, "pkg/data.json")):
+            with tempfile.TemporaryDirectory() as d:
+                root = Path(d)
+                repo, base = self.make_pr(root, {}, base_files=base_files, renamed=renamed)
+                out = self.run_select(repo, root, base, cwd="pkg")
+                self.assertEqual(out["PYTEST_MODE"], "full", out)
+                self.assertIn(want, out["PYTEST_MODE_REASON"])
+
+    def test_renamed_conftest_is_test_wide_config(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            repo, base = self.make_pr(root, {}, base_files={"pkg/conftest.py": "\n"},
+                                      renamed={"pkg/conftest.py": "pkg/helpers.py"})
+            out = self.run_select(repo, root, base, cwd="pkg")
+            self.assertEqual(out["PYTEST_MODE"], "full", out)
+            self.assertIn("conftest.py", out["PYTEST_MODE_REASON"])
+
+    def test_deleted_python_under_the_project_stays_affected(self) -> None:
+        # testmon sees a vanished module's fingerprint change and selects the tests that used it.
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            repo, base = self.make_pr(root, {}, base_files={"pkg/gone.py": "g = 1\n"}, removed=("pkg/gone.py",))
+            out = self.run_select(repo, root, base, cwd="pkg")
+            self.assertEqual(out["PYTEST_MODE"], "affected", out)
 
     def test_python_under_the_project_directory_is_affected(self) -> None:
         with tempfile.TemporaryDirectory() as d:
