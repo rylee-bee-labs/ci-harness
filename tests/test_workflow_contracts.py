@@ -1,8 +1,9 @@
 """Static contracts for the reusable templates (stdlib only, text-level).
 
 actionlint proves the workflows parse; these prove the CI-friction fixes stay in place:
-the preflight is every job's first step, reusable-python bounds every job and reports
-failures, and the secret scan stays narrow on PRs but full everywhere else.
+the preflight is every job's first step, every runner job in every workflow is bounded,
+reusable-python reports failures, and the secret scan stays narrow on PRs but full
+everywhere else.
 """
 import re
 import subprocess
@@ -17,6 +18,26 @@ TEMPLATES = sorted(WF.glob("reusable-*.yml"))
 
 def read(name: str) -> str:
     return (WF / name).read_text()
+
+
+def jobs_in(text: str) -> dict:
+    """Split a workflow's top-level `jobs:` mapping into {job-key: body-lines}.
+
+    Text-level (stdlib only), same as the rest of this file: job keys sit at
+    two-space indent and their bodies are everything up to the next job key.
+    """
+    match = re.search(r"^jobs:\s*$", text, re.M)
+    if match is None:
+        return {}
+    jobs: dict = {}
+    current = None
+    for line in text[match.end():].splitlines():
+        job = re.match(r"^  ([A-Za-z0-9_-]+):\s*$", line)
+        if job:
+            current = jobs[job.group(1)] = []
+        elif current is not None:
+            current.append(line)
+    return jobs
 
 
 class PreflightTest(unittest.TestCase):
@@ -57,6 +78,33 @@ class PreflightTest(unittest.TestCase):
         # RUNNER_TEMP is shared with the runner; never wipe a whole directory like bin/.
         for path in TEMPLATES:
             self.assertNotRegex(path.read_text(), r"conftest\.tar\.gz bin ", path.name)
+
+
+class EveryJobIsBoundedTest(unittest.TestCase):
+    """No runner-backed job in any workflow may fall back to GitHub's 360-minute default.
+
+    A job whose body is a reusable-workflow call (`uses:` at job level) has no
+    `runs-on:` of its own and GitHub's schema forbids `timeout-minutes` there, so
+    those are skipped; every other job must carry a `timeout-minutes`.
+    """
+
+    def test_every_runner_job_declares_a_timeout(self) -> None:
+        for path in sorted(WF.glob("*.yml")):
+            jobs = jobs_in(path.read_text())
+            self.assertTrue(jobs, path.name)
+            for name, body in jobs.items():
+                if any(line.startswith("    uses:") for line in body):
+                    continue  # reusable-workflow call: timeout-minutes is not allowed
+                self.assertTrue(
+                    any(line.startswith("    runs-on:") for line in body),
+                    f"{path.name}: job {name!r} has neither runs-on nor uses",
+                )
+                self.assertTrue(
+                    any(line.startswith("    timeout-minutes:") for line in body),
+                    f"{path.name}: job {name!r} has no timeout-minutes",
+                )
+
+
 class PythonTemplateTest(unittest.TestCase):
     text = read("reusable-python.yml")
 

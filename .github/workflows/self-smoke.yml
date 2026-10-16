@@ -46,6 +46,7 @@ jobs:
   otel-selftest:
     name: OpenTelemetry span helper self-test
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -61,6 +62,7 @@ jobs:
   otel-template-wiring:
     name: telemetry wiring in every template
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -407,6 +409,7 @@ jobs:
     needs: contract-freshness-stale
     if: always()
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Assert the probe's propagated tool exit code
         env:
@@ -446,6 +449,7 @@ jobs:
   contract-freshness-live:
     name: contract freshness — live remote sha (expect CURRENT)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
