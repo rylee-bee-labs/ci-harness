@@ -270,12 +270,6 @@ jobs:
           key: testmon-v1-${{ github.repository }}-${{ github.base_ref_name }}-${{ github.event.pull_request.base.sha }}
           restore-keys: |
             testmon-v1-${{ github.repository }}-${{ github.base_ref_name }}-
-      - name: Save testmon data for the default branch (hosted)
-        if: ${{ runner.environment == 'github-hosted' && github.event_name == 'push' && github.ref_name == github.event.repository.default_branch && success() }}
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: ${{ runner.temp }}/hosted/testmon/${{ github.repository_owner }}/${{ github.event.repository.name }}/${{ github.ref_name }}
-          key: testmon-v1-${{ github.repository }}-${{ github.ref_name }}-${{ github.sha }}
       # junit-xml goes to RUNNER_TEMP (outside the workspace, so it cannot be committed or
       # picked up by a repo's own globbing); the next two steps read it even when pytest failed.
       # pytest-select=affected: decide, before running anything, whether this run may use testmon
@@ -430,6 +424,14 @@ jobs:
               ;;
             *) run_full ;;
           esac
+      # After the pytest run, not before it: `success()` above must mean "the refresh run was
+      # green", and only a green refresh publishes a data file to cache at all.
+      - name: Save testmon data for the default branch (hosted)
+        if: ${{ runner.environment == 'github-hosted' && github.event_name == 'push' && github.ref_name == github.event.repository.default_branch && success() }}
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ${{ runner.temp }}/hosted/testmon/${{ github.repository_owner }}/${{ github.event.repository.name }}/${{ github.ref_name }}
+          key: testmon-v1-${{ github.repository }}-${{ github.ref_name }}-${{ github.sha }}
       # Failing test names and short tracebacks only, written to the job summary so a red run
       # is readable without opening the raw log. Passing tests are never listed.
       - name: Pytest failures to job summary

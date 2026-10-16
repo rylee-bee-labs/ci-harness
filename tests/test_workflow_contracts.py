@@ -607,6 +607,9 @@ class CacheTest(unittest.TestCase):
         self.assertIn("github.event_name == 'push'", save)
         self.assertIn("github.ref_name == github.event.repository.default_branch", save)
         self.assertIn("success()", save)
+        # `success()` has to be evaluated after the pytest run, or it saves on a red refresh.
+        self.assertLess(self.py.index("      - name: Run pytest"),
+                        self.py.index("      - name: Save testmon data for the default branch (hosted)"))
         # The self-hosted store is untouched: still the runner-local tool_cache, no actions/cache.
         select = step_script(self.py, "Select tests (full or affected)")
         self.assertIn('store="$TOOL_CACHE"', select)
