@@ -246,6 +246,46 @@ class AffectedSelectTest(unittest.TestCase):
         self.assertTrue(out["PYTEST_PUBLISH_FILE"].endswith("/testmon/o/r/main/" + "f" * 40 + ".testmondata"))
         self.check({"pkg/a.py": "x = 2\n"}, "full", "not a pull_request", EVENT_NAME="push", REF_NAME="dev")
 
+    def test_the_hosted_cache_path_is_the_path_the_select_step_reads(self) -> None:
+        # Hosted affected mode is two halves: the actions/cache path and this step's lookup.
+        # They must flatten owner/repo/branch identically, or every hosted PR restores data
+        # into a directory the lookup never looks in and silently falls back to the full suite.
+        restore = step_block(read("reusable-python.yml"),
+                             "Restore testmon data for this base branch (hosted)")
+        path_expr = re.search(r"^ +path: (\$\{\{ runner\.temp \}\}.*)$", restore, re.M).group(1)
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            repo, base = self.make_pr(root, {"pkg/a.py": "x = 2\n"})
+            restored = Path(path_expr
+                            .replace("${{ runner.temp }}", str(root / "temp"))
+                            .replace("${{ github.repository_owner }}", "o")
+                            .replace("${{ github.event.repository.name }}", "r")
+                            .replace("${{ github.base_ref_name }}", "main"))
+            restored.mkdir(parents=True, exist_ok=True)
+            (restored / f"{base}.testmondata").write_text("db")
+            out = self.run_select(repo, root, base, RUNNER_ENVIRONMENT="github-hosted")
+        self.assertEqual(out["PYTEST_MODE"], "affected", out)
+        self.assertIn("testmon data for base", out["PYTEST_MODE_REASON"])
+
+    def test_the_cache_save_path_is_where_a_refresh_run_publishes_to(self) -> None:
+        # The other half of the same pairing: what a push to the default branch writes under
+        # RUNNER_TEMP must be what the save step caches, or the restore finds nothing.
+        save = step_block(read("reusable-python.yml"),
+                          "Save testmon data for the default branch (hosted)")
+        path_expr = re.search(r"^ +path: (\$\{\{ runner\.temp \}\}.*)$", save, re.M).group(1)
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            repo, _ = self.make_pr(root, {"pkg/a.py": "x = 2\n"})
+            out = self.run_select(repo, root, None, EVENT_NAME="push", REF_NAME="main",
+                                  RUNNER_ENVIRONMENT="github-hosted")
+            saved = Path(path_expr
+                         .replace("${{ runner.temp }}", str(root / "temp"))
+                         .replace("${{ github.repository_owner }}", "o")
+                         .replace("${{ github.event.repository.name }}", "r")
+                         .replace("${{ github.ref_name }}", "main"))
+        self.assertEqual(out["PYTEST_MODE"], "refresh", out)
+        self.assertEqual(Path(out["PYTEST_PUBLISH_FILE"]).parent, saved)
+
     def test_unknown_select_value_is_an_error(self) -> None:
         with tempfile.TemporaryDirectory() as d, self.assertRaises(subprocess.CalledProcessError):
             root = Path(d)
@@ -555,7 +595,10 @@ class CacheTest(unittest.TestCase):
         for block in (restore, save):
             self.assertIn(sha, block)
             self.assertIn("if: ${{ runner.environment == 'github-hosted' &&", block)
-            self.assertIn("${{ runner.temp }}/hosted/testmon/${{ github.repository_name_owner }}", block)
+            # The path is the one the select step reads: owner_repo in one segment (its safe()
+            # form) and one slash-free branch segment.
+            self.assertIn("${{ runner.temp }}/hosted/testmon/${{ github.repository_owner }}/"
+                          "${{ github.event.repository.name }}/", block)
         # A PR restores the base branch's data for the base sha...
         self.assertIn("key: testmon-v1-${{ github.repository }}-${{ github.base_ref_name }}-${{ github.event.pull_request.base.sha }}", restore)
         self.assertIn("restore-keys: |\n            testmon-v1-${{ github.repository }}-${{ github.base_ref_name }}-", restore)
