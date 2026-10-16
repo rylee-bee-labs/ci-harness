@@ -473,6 +473,13 @@ class AffectedFixtureJobTest(unittest.TestCase):
         # ...and the modern spelling is still there for when the fixture is its own rootdir.
         self.assertIn("pythonpath = .", (conftest.parent / "pytest.ini").read_text())
 
+    def test_a_missing_report_reads_as_zero_node_ids_not_a_crash(self) -> None:
+        # Whether an empty selection leaves a junit report behind is exactly the kind of thing
+        # this job must not assume; without this the select run would abort the job instead of
+        # reaching the fallback it exists to prove.
+        self.assertIn('[ -s "$1" ] || return 0', self.script)
+        self.assertIn("<<'PY' || true", self.script)
+
     def test_the_job_runs_the_fixture_from_its_own_root(self) -> None:
         self.assertIn("cp -r fixtures/affected-demo", self.script)
         self.assertLess(self.script.index("cp -r fixtures/affected-demo"), self.script.index('cd "$work"'))

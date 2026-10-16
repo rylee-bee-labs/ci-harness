@@ -325,8 +325,12 @@ jobs:
           export TESTMON_DATAFILE="$work/.testmondata"
 
           # Node ids of a junit report: the evidence, and the zero-selection signal.
+          # Tolerant on purpose: whether an empty selection leaves a report behind is not
+          # something to assume, so no report means "no node ids", not a crash here. A run that
+          # really did break is caught by the next phase's own assertions, not papered over.
           nodes() {
-            python3 - "$1" <<'PY'
+            [ -s "$1" ] || return 0
+            python3 - "$1" <<'PY' || true
           import sys
           import xml.etree.ElementTree as ET
 
