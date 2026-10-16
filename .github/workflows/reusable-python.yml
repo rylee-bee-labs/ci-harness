@@ -69,6 +69,20 @@ on:
         type: number
         required: false
         default: 0
+      pytest-select:
+        description: >-
+          all (default) runs the whole suite. affected, on pull_request only, runs just the tests
+          pytest-testmon says the PR touched, using testmon data recorded on the base branch
+          (self-hosted: a runner-local dir under runner.tool_cache; hosted runners have no data
+          store yet, so they run the full suite). Falls back to the FULL suite, and says why in
+          the job summary, when there is no data, the data is for another base commit, the PR
+          touches conftest.py, pyproject.toml, uv.lock, setup.cfg, pytest.ini, tox.ini or a
+          .github/workflows file, or testmon selects zero tests although files changed. A push to
+          the default branch always runs the full suite and refreshes the data. testmon runs
+          are serial (pytest-testmon is installed for the run only); see README.
+        type: string
+        required: false
+        default: all
       timeout-minutes:
         description: >-
           Timeout for every job in this workflow (test, ruff, bandit), in minutes. A hung
@@ -151,6 +165,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # Depth 2 keeps both parents of a pull_request merge commit, so the base tip is HEAD^1.
+          fetch-depth: 2
 
 # Telemetry is observation, never authority: this step cannot fail the job
       # (continue-on-error) and the helper exits 0 even when the Collector is
@@ -203,20 +219,115 @@ jobs:
         run: uv sync --frozen ${{ inputs.sync-args }}
       # junit-xml goes to RUNNER_TEMP (outside the workspace, so it cannot be committed or
       # picked up by a repo's own globbing); the next two steps read it even when pytest failed.
+      # pytest-select=affected: decide, before running anything, whether this run may use testmon
+      # data, and say which mode ran and why. Every doubt resolves to the full suite.
+      - name: Select tests (full or affected)
+        shell: bash
+        env:
+          PYTEST_SELECT: ${{ inputs.pytest-select }}
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          BASE_REF: ${{ github.base_ref }}
+          REPOSITORY: ${{ github.repository }}
+          TOOL_CACHE: ${{ runner.tool_cache }}
+        run: |
+          set -euo pipefail
+          decide() {
+            echo "PYTEST_MODE=$1" >> "$GITHUB_ENV"
+            echo "PYTEST_MODE_REASON=$2" >> "$GITHUB_ENV"
+            echo "pytest mode: $1 ($2)"
+            printf '### pytest mode: %s\n\n%s\n\n' "$1" "$2" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          }
+          safe() { printf '%s' "$1" | tr -c 'A-Za-z0-9._/\n-' '_' | sed 's#\.\.#__#g'; }
+
+          case "$PYTEST_SELECT" in
+            all|affected) ;;
+            *) echo "::error::pytest-select must be 'all' or 'affected', got '$PYTEST_SELECT'"; exit 1 ;;
+          esac
+          [ "$PYTEST_SELECT" = affected ] || decide full "pytest-select=all"
+
+          # Self-hosted runners keep testmon data per repo and base branch on the runner host.
+          # Hosted runners have no persistent store here, so their dir is always empty.
+          if [ "${RUNNER_ENVIRONMENT:-}" = self-hosted ]; then store="$TOOL_CACHE"; else store="$RUNNER_TEMP/hosted"; fi
+          work="$RUNNER_TEMP/testmon"
+          rm -rf "$work"; mkdir -p "$work"
+          echo "TESTMON_DATAFILE=$work/.testmondata" >> "$GITHUB_ENV"
+
+          if [ "$EVENT_NAME" = push ] && [ "$REF_NAME" = "$DEFAULT_BRANCH" ]; then
+            echo "PYTEST_PUBLISH_FILE=$store/testmon/$(safe "$REPOSITORY")/$(safe "$REF_NAME")/$GITHUB_SHA.testmondata" >> "$GITHUB_ENV"
+            decide refresh "push to $DEFAULT_BRANCH: full suite, recording testmon data for $GITHUB_SHA"
+          fi
+          [ "$EVENT_NAME" = pull_request ] || decide full "event $EVENT_NAME is not a pull_request (affected mode is PR-only)"
+
+          git rev-parse --verify -q 'HEAD^2' > /dev/null || decide full "checkout is not a merge commit; cannot tell what the PR changed"
+          base=$(git rev-parse 'HEAD^1')
+          data="$store/testmon/$(safe "$REPOSITORY")/$(safe "$BASE_REF")/$base.testmondata"
+          [ -s "$data" ] || decide full "no testmon data for base ${base:0:12} in ${data%/*} (none recorded, or recorded for another base commit)"
+
+          changed=$(git diff --name-only 'HEAD^1' HEAD)
+          trigger=$(printf '%s\n' "$changed" | grep -E '(^|/)(conftest\.py|pyproject\.toml|uv\.lock|setup\.cfg|pytest\.ini|tox\.ini)$|^\.github/workflows/' | head -n 3 | paste -sd, - || true)
+          [ -z "$trigger" ] || decide full "PR touches test-wide config ($trigger)"
+
+          cp "$data" "$work/.testmondata"
+          if [ -n "$(git diff --name-only 'HEAD^1' HEAD -- . ':!*.md')" ]; then
+            echo "PYTEST_CHANGED_UNDER_PROJECT=1" >> "$GITHUB_ENV"
+          fi
+          decide affected "testmon data for base ${base:0:12}; PR changes: $(printf '%s\n' "$changed" | wc -l) file(s)"
+      # junit-xml goes to RUNNER_TEMP (outside the workspace, so it cannot be committed or
+      # picked up by a repo's own globbing); the next two steps read it even when pytest failed.
       - name: Run pytest
         env:
           PYTEST_WORKERS: ${{ inputs.pytest-workers }}
           JUNIT_XML: ${{ runner.temp }}/pytest-junit.xml
         run: |
-          if [ "${PYTEST_WORKERS:-0}" -gt 0 ]; then
-            # Into the environment `uv sync --frozen` just built, then run it as synced (--no-sync).
-            # `uv run --with` (the first version, ci-harness#42) ran pytest without the project's own
-            # dependencies: project-home#188 failed with "No module named 'fastapi'".
-            uv pip install --quiet pytest-xdist
-            uv run --no-sync pytest -n "$PYTEST_WORKERS" --junit-xml="$JUNIT_XML" ${{ inputs.pytest-args }}
-          else
-            uv run pytest --junit-xml="$JUNIT_XML" ${{ inputs.pytest-args }}
-          fi
+          run_full() {
+            if [ "${PYTEST_WORKERS:-0}" -gt 0 ]; then
+              # Into the environment `uv sync --frozen` just built, then run it as synced (--no-sync).
+              # `uv run --with` (the first version, ci-harness#42) ran pytest without the project's own
+              # dependencies: project-home#188 failed with "No module named 'fastapi'".
+              uv pip install --quiet pytest-xdist
+              uv run --no-sync pytest -n "$PYTEST_WORKERS" --junit-xml="$JUNIT_XML" ${{ inputs.pytest-args }}
+            else
+              uv run pytest --junit-xml="$JUNIT_XML" ${{ inputs.pytest-args }}
+            fi
+          }
+          summary() { printf '%s\n\n' "$1" >> "$GITHUB_STEP_SUMMARY"; }
+          case "${PYTEST_MODE:-full}" in
+            affected)
+              # testmon runs serial: no -n here. --testmon-forceselect keeps selection on when
+              # pytest-args carry -k/-m, which testmon would otherwise answer with the full suite.
+              uv pip install --quiet "pytest-testmon>=2.1,<3"
+              rc=0
+              uv run --no-sync pytest --testmon --testmon-forceselect --junit-xml="$JUNIT_XML" ${{ inputs.pytest-args }} || rc=$?
+              if [ "$rc" -eq 5 ] && [ "${PYTEST_CHANGED_UNDER_PROJECT:-}" = 1 ]; then
+                echo "::notice::testmon selected zero tests although files changed under the project; running the full suite"
+                summary "### pytest mode: full (fallback)"$'\n\n'"testmon selected zero tests although files changed under the project, so the full suite ran."
+                run_full
+              elif [ "$rc" -eq 5 ]; then
+                summary "testmon selected zero tests and the PR changed only markdown outside the tests' reach."
+              elif [ "$rc" -ne 0 ]; then
+                exit "$rc"
+              fi
+              ;;
+            refresh)
+              # Record while running everything. Publish only a green run with a non-empty db, so a
+              # failing main never replaces good data, then drop older files for this branch.
+              uv pip install --quiet "pytest-testmon>=2.1,<3"
+              uv run --no-sync pytest --testmon-noselect --junit-xml="$JUNIT_XML" ${{ inputs.pytest-args }}
+              if [ -s "$TESTMON_DATAFILE" ]; then
+                mkdir -p "${PYTEST_PUBLISH_FILE%/*}"
+                cp "$TESTMON_DATAFILE" "$PYTEST_PUBLISH_FILE.tmp.$$"
+                mv "$PYTEST_PUBLISH_FILE.tmp.$$" "$PYTEST_PUBLISH_FILE"
+                find "${PYTEST_PUBLISH_FILE%/*}" -maxdepth 1 -name '*.testmondata' ! -name "${PYTEST_PUBLISH_FILE##*/}" -delete
+                summary "testmon data published: ${PYTEST_PUBLISH_FILE}"
+              else
+                summary "testmon wrote no data; nothing published."
+              fi
+              ;;
+            *) run_full ;;
+          esac
       # Failing test names and short tracebacks only, written to the job summary so a red run
       # is readable without opening the raw log. Passing tests are never listed.
       - name: Pytest failures to job summary
