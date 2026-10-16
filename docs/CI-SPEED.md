@@ -23,9 +23,10 @@ Default is `all`.
   modes. The self-smoke job `affected-fixture` probes xdist + testmon and prints whether it works
   there; the template does not depend on it.
 - **Hosted runners** have no runner-local store, so the data travels through `actions/cache`
-  (pinned in `pins/ACTIONS.md`):
+  (pinned in `pins/ACTIONS.md`), in and out of the same directory shape the select step reads,
+  `<runner.temp>/hosted/testmon/<owner>/<repo>/<branch>/`:
   - a PR restores `testmon-v1-<repo>-<base branch>-<base sha>`, with the branch prefix as a
-    fallback, from `<runner.temp>/hosted/testmon/<owner>/<base branch>`;
+    fallback;
   - a green push to the default branch saves the same directory under
     `testmon-v1-<repo>-<default branch>-<sha>`;
   - the repository is in every key, so no repo ever reads another's data, and the fallback only
