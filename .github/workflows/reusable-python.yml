@@ -469,7 +469,11 @@ jobs:
                 mkdir -p "${PYTEST_PUBLISH_FILE%/*}"
                 cp "$TESTMON_DATAFILE" "$PYTEST_PUBLISH_FILE.tmp.$$"
                 mv "$PYTEST_PUBLISH_FILE.tmp.$$" "$PYTEST_PUBLISH_FILE"
-                find "${PYTEST_PUBLISH_FILE%/*/*}" -name '*.testmondata' ! -path "$PYTEST_PUBLISH_FILE" -delete
+                # Prune only THIS store (one project dir + python version): its older commits' data. Callers with
+                # another project dir on the same repo and branch keep theirs. Pre-key-dir files left directly in
+                # the <repo>/<ref> folder are the old layout and are dropped (depth 1 only: never a sibling store).
+                find "${PYTEST_PUBLISH_FILE%/*}" -maxdepth 1 -name '*.testmondata' ! -path "$PYTEST_PUBLISH_FILE" -delete
+                find "${PYTEST_PUBLISH_FILE%/*/*}" -maxdepth 1 -name '*.testmondata' -delete
                 echo "PYTEST_PUBLISHED=1" >> "$GITHUB_ENV"
                 summary "testmon data published: ${PYTEST_PUBLISH_FILE}"
               else

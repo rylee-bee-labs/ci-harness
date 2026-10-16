@@ -656,6 +656,28 @@ class OtelHelperPinTest(unittest.TestCase):
             self.assertEqual(pin, digest)
 
 
+
+class TestmonPruneKeepsSiblingStores(unittest.TestCase):
+    """The publish step's prune (the two `find` lines) runs for real against a temp store: two project dirs on one
+    repo and branch keep each other's data; only this store's older commits and the old flat layout go."""
+
+    def test_prune_keeps_the_sibling_store(self):
+        text = read("reusable-python.yml")
+        lines = [ln.strip() for ln in text.splitlines() if ln.strip().startswith('find "${PYTEST_PUBLISH_FILE')]
+        self.assertEqual(len(lines), 2, lines)
+        with tempfile.TemporaryDirectory() as d:
+            ref = Path(d) / "testmon" / "o_r" / "main"
+            a, b = ref / "keyA", ref / "keyB"
+            a.mkdir(parents=True)
+            b.mkdir(parents=True)
+            for p in (a / "old.testmondata", a / "new.testmondata", b / "theirs.testmondata", ref / "flat.testmondata"):
+                p.write_text("db")
+            env = {"PATH": "/usr/bin:/bin", "PYTEST_PUBLISH_FILE": str(a / "new.testmondata")}
+            subprocess.run(["bash", "-c", "\n".join(lines)], env=env, check=True)
+            left = sorted(str(p.relative_to(ref)) for p in ref.rglob("*.testmondata"))
+        self.assertEqual(left, ["keyA/new.testmondata", "keyB/theirs.testmondata"])
+
+
 if __name__ == "__main__":
     unittest.main()
 
