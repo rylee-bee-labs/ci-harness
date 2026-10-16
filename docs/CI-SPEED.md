@@ -12,12 +12,12 @@ Default is `all`.
   (the base tip) and never writes back.
 - **Data, hosted.** Runners are throwaway, so the db goes through `actions/cache/save` and
   `actions/cache/restore` (v6.1.0, pinned by SHA). A green push to the default branch saves
-  `.testmondata` under `testmon-<os>-<python>-<hash of project-directory>-<github.sha>`. A PR restores the
-  exact key for `pull_request.base.sha`, else the newest entry with the same prefix. Stale data is safe: testmon
-  compares current file fingerprints with the stored ones, so it can only select more tests. Nothing restored
-  means the full suite. The job summary says whether the data was for the base or older.
-- **Full-suite fallbacks**, each stated in the job summary: no data (self-hosted: none for the
-  PR's base commit; hosted: nothing restored), a changed `conftest.py`, `pyproject.toml`, `uv.lock`,
+  `.testmondata` under `testmon-<os>-<python>-<hash of project-directory>-<github.sha>`. A PR restores
+  only the entry for its merge commit's first parent (the base it is tested against). There is no
+  prefix fallback: data from an older main misses the changes made since, and testmon cannot see the
+  non-`.py` ones, so it could select too few tests. No exact entry means the full suite.
+- **Full-suite fallbacks**, each stated in the job summary: no testmon data for exactly the PR's
+  base commit, a changed `conftest.py`, `pyproject.toml`, `uv.lock`,
   `setup.cfg`, `pytest.ini`, `tox.ini` or `.github/workflows/*` file (anywhere in the repo), a non-PR
   event, **any changed file that is not a `.py` file under `project-directory`**, and testmon selecting
   zero tests (pytest exit 5 or an empty junit file).

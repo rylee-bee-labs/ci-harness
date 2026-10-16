@@ -81,9 +81,8 @@ on:
           pytest-testmon says the PR touched, using testmon data recorded on the base branch
           (self-hosted: a runner-local dir under runner.tool_cache; hosted: actions/cache, saved on
           a push to the default branch and restored on the PR, see docs/CI-SPEED.md). Falls back to the FULL suite, and says why in
-          the job summary, when there is no data (self-hosted: none for the PR's base commit;
-          hosted: nothing restored, while an older base's data is used because stale data only
-          selects more), the PR touches conftest.py, pyproject.toml, uv.lock, setup.cfg,
+          the job summary, when there is no testmon data recorded for exactly the PR's base
+          commit (HEAD^1 of the merge commit), the PR touches conftest.py, pyproject.toml, uv.lock, setup.cfg,
           pytest.ini, tox.ini or a .github/workflows file, the PR changes any file that is not a
           .py file under project-directory, or testmon selects zero tests. A push to the default
           branch always runs the full suite and refreshes the data. testmon runs are serial
@@ -251,10 +250,11 @@ jobs:
         run: uv sync --frozen ${{ inputs.sync-args }}
       # Hosted testmon store (pytest-select=affected only): runners are throwaway, so the data goes
       # through actions/cache. A push to the default branch saves it under a key that ends in the
-      # commit sha; a pull_request restores the exact key of its base sha, else the newest entry
-      # with the same prefix. A stale entry is safe: testmon compares the current file fingerprints
-      # with the stored ones, so older data can only select MORE tests, never fewer. Nothing
-      # restored = the full suite. Self-hosted runners keep the runner-local store instead.
+      # commit sha; a pull_request restores only the entry for its merge commit's first parent
+      # (HEAD^1, the base it is tested against). No prefix fallback: data recorded on an older main
+      # misses changes made since, which testmon may not see (non-.py files), so an older entry
+      # could select too few tests. No exact entry = the full suite. Self-hosted runners keep the
+      # runner-local store instead.
       - name: Testmon cache key (hosted)
         id: testmon-key
         if: ${{ runner.environment == 'github-hosted' && inputs.pytest-select == 'affected' }}
@@ -264,15 +264,16 @@ jobs:
           KEY_PREFIX: testmon-${{ runner.os }}-${{ inputs.python-version }}
         run: |
           echo "prefix=$KEY_PREFIX-$(printf '%s' "$PROJECT_DIR" | sha256sum | cut -c1-16)-" >> "$GITHUB_OUTPUT"
+          if git rev-parse -q --verify 'HEAD^2' > /dev/null; then
+            echo "base=$(git rev-parse 'HEAD^1')" >> "$GITHUB_OUTPUT"
+          fi
       - name: Restore testmon data (hosted, pull_request)
         id: testmon-restore
-        if: ${{ runner.environment == 'github-hosted' && inputs.pytest-select == 'affected' && github.event_name == 'pull_request' }}
+        if: ${{ runner.environment == 'github-hosted' && inputs.pytest-select == 'affected' && github.event_name == 'pull_request' && steps.testmon-key.outputs.base != '' }}
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/testmon-hosted/.testmondata
-          key: ${{ steps.testmon-key.outputs.prefix }}${{ github.event.pull_request.base.sha }}
-          restore-keys: |
-            ${{ steps.testmon-key.outputs.prefix }}
+          key: ${{ steps.testmon-key.outputs.prefix }}${{ steps.testmon-key.outputs.base }}
       # pytest-select=affected: decide, before running anything, whether this run may use testmon
       # data, and say which mode ran and why. Every doubt resolves to the full suite.
       - name: Select tests (full or affected)
@@ -287,7 +288,7 @@ jobs:
           TOOL_CACHE: ${{ runner.tool_cache }}
           PROJECT_DIR: ${{ inputs.project-directory }}
           HOSTED_KEY_PREFIX: ${{ steps.testmon-key.outputs.prefix }}
-          HOSTED_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HOSTED_BASE_SHA: ${{ steps.testmon-key.outputs.base }}
           HOSTED_RESTORED_KEY: ${{ steps.testmon-restore.outputs.cache-matched-key }}
         run: |
           set -euo pipefail
@@ -335,11 +336,11 @@ jobs:
           else
             data="$hosted_file"
             [ -s "$data" ] || decide full "no testmon data restored from the actions cache for base ${base:0:12} (none saved yet, or evicted)"
-            if [ "$HOSTED_RESTORED_KEY" = "$HOSTED_KEY_PREFIX$HOSTED_BASE_SHA" ]; then
-              origin="testmon data for base ${base:0:12}"
-            else
-              origin="testmon data from an older base (${HOSTED_RESTORED_KEY:-unknown key}); stale data only selects more tests"
-            fi
+            # Only data saved for exactly this PR's base is trusted (the cache service may also
+            # prefix-match a primary key, so check what was actually restored).
+            [ "$HOSTED_BASE_SHA" = "$base" ] && [ "$HOSTED_RESTORED_KEY" = "$HOSTED_KEY_PREFIX$base" ] \
+              || decide full "testmon data restored is for another commit (${HOSTED_RESTORED_KEY:-unknown key}), not base ${base:0:12}"
+            origin="testmon data for base ${base:0:12}"
           fi
 
           # --no-renames: a rename lists both paths, so a file moved into the project, or a renamed

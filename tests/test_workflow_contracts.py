@@ -295,12 +295,12 @@ class AffectedSelectTest(unittest.TestCase):
             out = self.run_select(repo, root, None, HOSTED_BASE_SHA=base, HOSTED_RESTORED_KEY=prefix + base, **hosted)
             self.assertEqual(out["PYTEST_MODE"], "affected")
             self.assertIn(f"testmon data for base {base[:12]}", out["PYTEST_MODE_REASON"])
-        with tempfile.TemporaryDirectory() as d:  # prefix fallback: stale but usable
+        with tempfile.TemporaryDirectory() as d:  # data for an older commit: never trusted
             root = Path(d)
             repo, base = self.make_pr(root, {"pkg/a.py": "x = 2\n"})
             out = self.run_select(repo, root, None, HOSTED_BASE_SHA=base, HOSTED_RESTORED_KEY=prefix + "1" * 40, **hosted)
-            self.assertEqual(out["PYTEST_MODE"], "affected")
-            self.assertIn("older base", out["PYTEST_MODE_REASON"])
+            self.assertEqual(out["PYTEST_MODE"], "full")
+            self.assertIn("is for another commit", out["PYTEST_MODE_REASON"])
         with tempfile.TemporaryDirectory() as d:  # nothing restored: full suite
             root = Path(d)
             repo, base = self.make_pr(root, {"pkg/a.py": "x = 2\n"})
@@ -568,8 +568,8 @@ class CacheTest(unittest.TestCase):
         restore = self.py.split("name: Restore testmon data", 1)[1].split("\n      # ", 1)[0]
         self.assertIn("github.event_name == 'pull_request'", restore)
         self.assertNotIn("'push'", restore)
-        self.assertIn("${{ github.event.pull_request.base.sha }}", restore)
-        self.assertRegex(restore, r"restore-keys: \|\n\s+\$\{\{ steps.testmon-key.outputs.prefix \}\}$")
+        self.assertIn("key: ${{ steps.testmon-key.outputs.prefix }}${{ steps.testmon-key.outputs.base }}", restore)
+        self.assertNotIn("restore-keys", restore)  # an older main's data could select too few tests
         key = self.py.split("name: Testmon cache key", 1)[1].split("\n      - name:", 1)[0]
         self.assertIn("testmon-${{ runner.os }}-${{ inputs.python-version }}", key)
         self.assertIn("sha256sum", key)  # project-directory hash
