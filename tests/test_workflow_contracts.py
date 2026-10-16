@@ -406,6 +406,84 @@ class CallerQuotingTest(unittest.TestCase):
         self.assertIn("string", doc)
 
 
+class AffectedFixtureJobTest(unittest.TestCase):
+    """self-smoke's `testmon select/fallback on a fixture repo` job.
+
+    This job is the only proof that `pytest-select: affected` works at all, so the
+    three things it depends on are asserted here where they run locally: testmon is
+    installed on the interpreter that runs pytest, the fixture imports the way a real
+    repo's tests do, and zero selection is read from node ids rather than from an exit
+    code nobody here can check.
+    """
+
+    root = Path(__file__).resolve().parent.parent
+    script = step_script(read("self-smoke.yml"), "Prove selection with real pytest-testmon")
+
+    def test_testmon_is_installed_on_the_interpreter_that_runs_pytest(self) -> None:
+        self.assertIn('python3 -m venv "$venv"', self.script)
+        self.assertRegex(self.script, r'\$venv/bin/pip" install .*\bpytest-testmon\b')
+        # The venv is on PATH before any pytest call, so `pytest` and the `python3` that
+        # reads the junit reports are the same interpreter testmon was installed into.
+        self.assertLess(self.script.index('export PATH="$venv/bin:$PATH"'),
+                        self.script.index("pytest --help"))
+        self.assertLess(self.script.index('export PATH="$venv/bin:$PATH"'),
+                        self.script.index("pytest -q --junit-xml"))
+
+    def test_the_install_guards_nothing_it_cannot_check(self) -> None:
+        # A version bound here cannot be verified from this repo, and an unsatisfiable one
+        # fails the job during resolution, before the job proves anything.
+        self.assertNotRegex(self.script, r"pytest-testmon[<>~=]")
+        self.assertNotRegex(self.script, r'"pytest[<>=~]')
+
+    def test_the_flags_are_probed_not_assumed(self) -> None:
+        self.assertIn("options=$(pytest --help 2>&1)", self.script)
+        for flag in ("testmon", "testmon-noselect", "testmon-forceselect"):
+            self.assertIn("for flag in testmon testmon-noselect testmon-forceselect", self.script)
+            self.assertIn(f"--${{flag}}", self.script)
+        self.assertIn("::error::the installed pytest-testmon has no --$flag", self.script)
+
+    def test_zero_selection_is_read_from_node_ids_not_from_one_exit_code(self) -> None:
+        self.assertNotIn("-eq 5", self.script)  # no decision anywhere on exit 5
+        self.assertIn("RUN_N", self.script)
+        self.assertIn("expected zero selected node ids", self.script)
+        self.assertIn("produced no test node ids", self.script)
+        # The fallback is proven, not just described: the full suite must run and be green.
+        self.assertIn("run j2b.xml", self.script)
+        self.assertIn('the full-suite fallback was not green', self.script)
+        self.assertIn('the fallback ran a different set than the record run', self.script)
+
+    def test_the_job_prints_the_evidence_a_reader_needs(self) -> None:
+        for phase in ("phase 1/4", "phase 2/4", "phase 3/4", "phase 4/4"):
+            self.assertIn(phase, self.script)
+        self.assertIn("test node id(s)", self.script)  # what was selected
+        self.assertIn("2 before, 1 expected after", self.script)  # before/after counts
+        self.assertIn("exit $rc", self.script)  # the exit code, as evidence
+        self.assertRegex(self.script, r'(?m)^say "OK: recorded both fixture tests')
+
+    def test_the_fixture_imports_the_way_a_repo_s_tests_do(self) -> None:
+        conftest = (self.root / "fixtures" / "affected-demo" / "conftest.py")
+        self.assertTrue(conftest.exists(), "the fixture lost its own sys.path")
+        text = conftest.read_text()
+        self.assertIn("sys.path.insert(0, ROOT)", text)
+        self.assertIn('Path(__file__).resolve().parent', text)
+        # The tests still import the way a repo's tests do (no __init__.py trickery).
+        self.assertIn("from calc import add", (conftest.parent / "tests" / "test_calc.py").read_text())
+        self.assertIn("from text import shout", (conftest.parent / "tests" / "test_text.py").read_text())
+        self.assertFalse((conftest.parent / "tests" / "__init__.py").exists())
+        # ...and the modern spelling is still there for when the fixture is its own rootdir.
+        self.assertIn("pythonpath = .", (conftest.parent / "pytest.ini").read_text())
+
+    def test_the_job_runs_the_fixture_from_its_own_root(self) -> None:
+        self.assertIn("cp -r fixtures/affected-demo", self.script)
+        self.assertLess(self.script.index("cp -r fixtures/affected-demo"), self.script.index('cd "$work"'))
+
+    def test_the_run_block_is_valid_shell(self) -> None:
+        # actionlint is not installed in every sandbox and is not vendored; `bash -n` is the
+        # part of its shell checking that always runs.
+        proc = subprocess.run(["bash", "-n"], input=self.script, capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+
+
 class CacheTest(unittest.TestCase):
     py = read("reusable-python.yml")
     node = read("reusable-node.yml")

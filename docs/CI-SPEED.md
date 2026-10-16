@@ -14,6 +14,11 @@ Default is `all`.
   a changed `conftest.py`, `pyproject.toml`, `uv.lock`, `setup.cfg`, `pytest.ini`, `tox.ini` or
   `.github/workflows/*` file, a non-PR event, and testmon selecting zero tests while a non-markdown
   file changed under `project-directory` (pytest exit 5 becomes a full run).
+  The self-smoke job `affected-fixture` proves that fallback by *node id* — it asserts the select
+  run produced zero test node ids, runs the full suite and asserts both fixture tests ran — and
+  prints pytest's exit code as evidence rather than branching on it. So the proof does not depend
+  on which exit code a given pytest-testmon uses for an empty selection; the template's `rc -eq 5`
+  check still does.
 - **xdist.** testmon runs are serial: `pytest-workers` is ignored in `affected` and refresh
   modes. The self-smoke job `affected-fixture` probes xdist + testmon and prints whether it works
   there; the template does not depend on it.

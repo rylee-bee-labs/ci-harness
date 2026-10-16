@@ -270,13 +270,20 @@ jobs:
       junit-artifact-name: pytest-junit-affected
 
   # testmon itself, on a fixture repo: record, change one module, only its test is selected; a
-  # change with no covering test selects zero (exit 5, which the template turns into a full run);
-  # and xdist + testmon is probed and reported (informational: the template runs testmon serial).
+  # change with no covering test selects zero test node ids, which the template turns into a full
+  # run; and xdist + testmon is probed and reported (informational: the template runs testmon
+  # serial).
+  #
+  # Nothing about pytest-testmon is assumed here, because this job IS the proof that the
+  # template's affected mode works: which flags exist is read out of `pytest --help` of the
+  # interpreter that runs the tests, and "testmon selected nothing" is read out of the junit
+  # report rather than out of one exit code. Each phase prints a banner before it starts and its
+  # counts after, so a red log names the phase that never finished.
   affected-fixture:
     name: testmon select/fallback on a fixture repo
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -285,35 +292,109 @@ jobs:
       - name: Prove selection with real pytest-testmon
         run: |
           set -euo pipefail
-          python3 -m venv "$RUNNER_TEMP/venv"
-          "$RUNNER_TEMP/venv/bin/pip" install --quiet "pytest>=8,<10" "pytest-testmon>=2.1,<3" pytest-xdist
-          export PATH="$RUNNER_TEMP/venv/bin:$PATH"
+          say() { printf '%s\n' "$*"; }
+          fail() { say "::error::$*"; exit 1; }
+
+          venv="$RUNNER_TEMP/venv"
+          python3 -m venv "$venv"
+          # Into the venv, for this job only, and with no version bounds: a bound nobody can
+          # check from here fails the job during resolution, before it proves anything.
+          "$venv/bin/pip" install --quiet pytest pytest-testmon pytest-xdist
+          export PATH="$venv/bin:$PATH"   # so pytest and python3 below are the venv's
+
+          say "interpreter: $(python3 -c 'import sys; print(sys.executable, sys.version.split()[0])')"
+          say "pytest: $(pytest --version 2>&1 | head -n 1)"
+          say "pytest-testmon: $("$venv/bin/pip" show pytest-testmon | sed -n 's/^Version: /version /p')"
+
+          # The flags reusable-python.yml passes must exist in THIS pytest. A missing one is a
+          # hard error naming the flag, followed by every testmon flag this pytest does offer.
+          options=$(pytest --help 2>&1)
+          for flag in testmon testmon-noselect testmon-forceselect; do
+            if ! printf '%s\n' "$options" | grep -qE -- "^[[:space:]]+--${flag}([[:space:]]|$)"; then
+              say "::error::the installed pytest-testmon has no --$flag, which reusable-python.yml passes in affected mode"
+              printf '%s\n' "$options" | grep -o -- '--testmon[a-z-]*' | sort -u || true
+              exit 1
+            fi
+          done
+          say "testmon flags present: --testmon --testmon-noselect --testmon-forceselect"
+
           work="$RUNNER_TEMP/affected"
-          rm -rf "$work"; cp -r fixtures/affected-demo "$work"; cd "$work"
+          rm -rf "$work"
+          cp -r fixtures/affected-demo "$work"
+          cd "$work"                       # the fixture is its own rootdir from here on
           export TESTMON_DATAFILE="$work/.testmondata"
-          ran() { python3 -c 'import sys,xml.etree.ElementTree as E; print(" ".join(sorted(c.get("name") for c in E.parse(sys.argv[1]).getroot().iter("testcase"))))' "$1"; }
 
-          pytest -q --testmon-noselect --junit-xml=j0.xml
-          echo "recorded run:   $(ran j0.xml)"
-          [ "$(ran j0.xml)" = "test_add test_shout" ]
+          # Node ids of a junit report: the evidence, and the zero-selection signal.
+          nodes() {
+            python3 - "$1" <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
 
+          ids = sorted(f"{c.get('classname', '')}::{c.get('name', '')}".strip(":")
+                       for c in ET.parse(sys.argv[1]).getroot().iter("testcase"))
+          print("\n".join(ids))
+          PY
+          }
+
+          # run <report> [pytest args...]: one pytest run, reported as exit code plus node ids.
+          # RUN_RC / RUN_N / RUN_IDS are the result: the exit code is evidence, never the
+          # decision — "did the selector produce any node ids at all" is the decision.
+          run() {
+            report="$1"; shift
+            rc=0
+            pytest -q --junit-xml="$report" "$@" || rc=$?
+            ids=$(nodes "$report")
+            if [ -n "$ids" ]; then n=$(printf '%s\n' "$ids" | grep -c .); else n=0; fi
+            say "  pytest $* -> exit $rc, $n test node id(s)"
+            if [ -n "$ids" ]; then printf '%s\n' "$ids" | sed 's/^/    /'; fi
+            RUN_RC=$rc; RUN_N=$n; RUN_IDS=$ids
+          }
+
+          say "== phase 1/4: record testmon data for the fixture (--testmon-noselect)"
+          run j0.xml --testmon-noselect
+          [ "$RUN_RC" -eq 0 ] || fail "the record run was not green (exit $RUN_RC)"
+          [ "$RUN_N" -eq 2 ] || fail "the record run ran $RUN_N test(s), expected both fixture tests"
+          recorded=$RUN_IDS
+          if [ -s "$TESTMON_DATAFILE" ]; then
+            say "  recorded $RUN_N tests into $TESTMON_DATAFILE ($(wc -c < "$TESTMON_DATAFILE") bytes)"
+          else
+            say "  ::warning::no testmon data at TESTMON_DATAFILE after the record run"
+          fi
+
+          say "== phase 2/4: calc.py changed -> only the test covering it is affected (2 before, 1 expected after)"
           printf '\n# touched\ndef sub(a: int, b: int) -> int:\n    return a - b\n' >> calc.py
-          pytest -q --testmon --testmon-forceselect --junit-xml=j1.xml
-          echo "after calc.py:  $(ran j1.xml)"
-          [ "$(ran j1.xml)" = "test_add" ]
+          run j1.xml --testmon --testmon-forceselect
+          [ "$RUN_RC" -eq 0 ] || fail "the affected run was not green (exit $RUN_RC)"
+          [ "$RUN_N" -eq 1 ] || fail "expected 1 selected test after calc.py changed, got $RUN_N: $RUN_IDS"
+          case "$RUN_IDS" in *test_add*) ;; *) fail "the selected test is not test_add: $RUN_IDS" ;; esac
+          if printf '%s' "$RUN_IDS" | grep -q test_shout; then
+            fail "test_shout was selected although only calc.py changed: $RUN_IDS"
+          fi
 
-          # Nothing covers this module: testmon selects zero tests and pytest exits 5.
-          echo 'VALUE = 1' > orphan.py
-          rc=0; pytest -q --testmon --testmon-forceselect --junit-xml=j2.xml || rc=$?
-          echo "orphan change:  exit $rc"
-          [ "$rc" -eq 5 ]
+          # Nothing covers this module, so testmon's selection is empty. The template's fallback
+          # keys on that empty node id list, which is what is asserted here; the exit code pytest
+          # happens to use for an empty selection is reported above, never assumed.
+          say "== phase 3/4: a module no test covers selects zero tests -> the template's full-run fallback"
+          say 'VALUE = 1' > orphan.py
+          run j2.xml --testmon --testmon-forceselect
+          [ "$RUN_N" -eq 0 ] || fail "expected zero selected node ids after adding an uncovered module, got: $RUN_IDS"
+          say "  the select step produced no test node ids (pytest exit $RUN_RC) -> running the full suite, as the template does"
+          run j2b.xml
+          [ "$RUN_RC" -eq 0 ] || fail "the full-suite fallback was not green (exit $RUN_RC)"
+          [ "$RUN_IDS" = "$recorded" ] || fail "the fallback ran a different set than the record run: $RUN_IDS"
 
           # Informational: does testmon cooperate with xdist here? The template does not depend on it.
-          if pytest -q --testmon-noselect -n 2 --junit-xml=j3.xml >/dev/null 2>&1 && [ "$(ran j3.xml)" = "test_add test_shout" ]; then
-            echo "xdist+testmon:  works in this setup (template still runs testmon serial)"
+          say "== phase 4/4: informational, does testmon cooperate with xdist here?"
+          rc=0
+          pytest -q --testmon-noselect -n 2 --junit-xml=j3.xml > /dev/null 2>&1 || rc=$?
+          xids=$(nodes j3.xml 2>/dev/null || true)
+          if [ "$rc" -eq 0 ] && [ "$xids" = "$recorded" ]; then
+            say "  xdist+testmon: works in this setup (the template still runs testmon serial)"
           else
-            echo "xdist+testmon:  does NOT work in this setup; serial testmon is the pattern"
+            say "  xdist+testmon: does NOT work in this setup (exit $rc, ids: ${xids:-none}); serial testmon is the pattern"
           fi
+
+          say "OK: recorded both fixture tests, 1 selected after calc.py changed, 0 after an uncovered module, both again through the full-suite fallback"
 
   node:
     name: node template
