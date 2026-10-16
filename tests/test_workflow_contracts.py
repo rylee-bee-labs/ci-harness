@@ -57,6 +57,46 @@ class PreflightTest(unittest.TestCase):
         # RUNNER_TEMP is shared with the runner; never wipe a whole directory like bin/.
         for path in TEMPLATES:
             self.assertNotRegex(path.read_text(), r"conftest\.tar\.gz bin ", path.name)
+class RepoCollectionTest(unittest.TestCase):
+    """The repo-wide gate must not collect the self-smoke fixture repos.
+
+    fixtures/ holds fixture *repos*, each with its own pytest.ini and its own
+    import root. Collected under ci-harness's rootdir they fail collection
+    (affected-demo's tests import sibling modules from their own root), which
+    took `python3 -m pytest -q` red on #57. Excluding them here must not stop
+    self-smoke.yml from running them: that job copies the fixture out and runs
+    it from its own rootdir, which is asserted too.
+    """
+
+    root = Path(__file__).resolve().parent.parent
+    ini = root / "pytest.ini"
+
+    def ini_get(self, option: str) -> str:
+        text = self.ini.read_text()
+        match = re.search(rf"^{option}\s*=?\s*(.*)$", text, re.M)
+        self.assertIsNotNone(match, f"pytest.ini has no {option}")
+        return match.group(1).strip()
+
+    def test_repo_wide_run_collects_tests_only(self) -> None:
+        self.assertEqual(self.ini_get("testpaths"), "tests")
+
+    def test_fixtures_are_never_recursed_into(self) -> None:
+        self.assertIn("fixtures", self.ini_get("norecursedirs").split())
+
+    def test_the_exclusion_is_real_because_fixtures_are_their_own_repos(self) -> None:
+        fixture_inis = sorted((self.root / "fixtures").glob("*/pytest.ini"))
+        self.assertTrue(fixture_inis, "fixtures/ no longer holds any self-contained fixture repo")
+        # The import that breaks collection from the repo root is still there:
+        # the fix is the exclusion plus the fixture's own sys.path, not a deleted import.
+        test_calc = (self.root / "fixtures" / "affected-demo" / "tests" / "test_calc.py").read_text()
+        self.assertIn("from calc import add", test_calc)
+
+    def test_the_fixture_run_by_self_smoke_is_not_the_repo_wide_run(self) -> None:
+        smoke = step_script(read("self-smoke.yml"), "Prove selection with real pytest-testmon")
+        self.assertIn("cp -r fixtures/affected-demo", smoke)
+        self.assertIn('cd "$work"', smoke)
+
+
 class PythonTemplateTest(unittest.TestCase):
     text = read("reusable-python.yml")
 
