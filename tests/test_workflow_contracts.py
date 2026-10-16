@@ -332,6 +332,43 @@ class WorkerSizingTest(unittest.TestCase):
         self.assertIn("max(1, min(cap_cores, 8) // max(1, busy_jobs))", block)
 
 
+class CacheTest(unittest.TestCase):
+    py = read("reusable-python.yml")
+    node = read("reusable-node.yml")
+
+    def test_every_python_job_warms_uv_cache_before_syncing(self) -> None:
+        for block in self.py.split("\n    steps:\n")[1:]:
+            self.assertLess(block.index("Warm uv cache"), block.index("uv sync --frozen"))
+            self.assertLess(block.index("Preflight"), block.index("Warm uv cache"))
+        self.assertEqual(self.py.count("name: Warm uv cache"), 3)
+
+    def test_self_hosted_cache_dirs_live_in_the_tool_cache(self) -> None:
+        self.assertIn("CACHE_DIR: ${{ runner.tool_cache }}/uv-cache", self.py)
+        self.assertIn("UV_CACHE_DIR:uv-cache npm_config_cache:npm-cache", self.node)
+        self.assertIn("TOOL_CACHE: ${{ runner.tool_cache }}", self.node)
+        for text in (self.py, self.node):
+            self.assertIn("if: ${{ runner.environment == 'self-hosted' }}", text)
+
+    def test_hosted_npm_cache_uses_setup_node_and_self_hosted_does_not(self) -> None:
+        self.assertIn("cache: ${{ runner.environment == 'github-hosted' && 'npm' || '' }}", self.node)
+        self.assertIn("cache-dependency-path: ${{ inputs.working-directory }}/package-lock.json", self.node)
+        self.assertIn("actions/setup-node@820762786026740c76f36085b0efc47a31fe5020", self.node)  # pinned SHA
+
+    def test_venv_and_node_modules_are_never_cached(self) -> None:
+        for text in (self.py, self.node):
+            self.assertNotIn("actions/cache", text)
+            for line in text.splitlines():
+                if re.search(r"(UV_CACHE_DIR|npm_config_cache|CACHE_DIR)\b", line) and not line.lstrip().startswith("#"):
+                    self.assertNotRegex(line, r"\.venv|node_modules", line)
+
+    def test_no_unpinned_actions_were_added(self) -> None:
+        for path in TEMPLATES:
+            for use in re.findall(r"^(?: {6}- | {8})uses: (\S+)", path.read_text(), re.M):
+                if use.startswith("./"):
+                    continue
+                self.assertRegex(use, r"@[0-9a-f]{40}$", f"{path.name}: {use}")
+
+
 class SecretScanTest(unittest.TestCase):
     text = read("reusable-secret-scan.yml")
 

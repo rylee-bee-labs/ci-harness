@@ -216,6 +216,21 @@ jobs:
           if [ -s "$OTELSPAN_HELPER" ]; then
             bash "$OTELSPAN_HELPER" context --env-file "$OTELSPAN_ENV_FILE" || true
           fi
+      # Self-hosted runners share one uv cache per runner host (uv's cache is safe for concurrent
+      # use), so a job's `uv sync` is mostly hardlinks. Only the cache is shared: never .venv.
+      # Hosted runners keep uv's default cache dir (setup-uv's cache is not pinned yet; docs/CI-SPEED.md).
+      - name: Warm uv cache (self-hosted runner-local dir)
+        if: ${{ runner.environment == 'self-hosted' }}
+        shell: bash
+        env:
+          CACHE_DIR: ${{ runner.tool_cache }}/uv-cache
+        run: |
+          if mkdir -p "$CACHE_DIR" && [ -w "$CACHE_DIR" ]; then
+            echo "UV_CACHE_DIR=$CACHE_DIR" >> "$GITHUB_ENV"
+            echo "uv cache: $CACHE_DIR"
+          else
+            echo "::warning::uv cache dir $CACHE_DIR is not writable; using uv's default cache"
+          fi
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ inputs.python-version }}
@@ -528,6 +543,21 @@ jobs:
           if [ -s "$OTELSPAN_HELPER" ]; then
             bash "$OTELSPAN_HELPER" context --env-file "$OTELSPAN_ENV_FILE" || true
           fi
+      # Self-hosted runners share one uv cache per runner host (uv's cache is safe for concurrent
+      # use), so a job's `uv sync` is mostly hardlinks. Only the cache is shared: never .venv.
+      # Hosted runners keep uv's default cache dir (setup-uv's cache is not pinned yet; docs/CI-SPEED.md).
+      - name: Warm uv cache (self-hosted runner-local dir)
+        if: ${{ runner.environment == 'self-hosted' }}
+        shell: bash
+        env:
+          CACHE_DIR: ${{ runner.tool_cache }}/uv-cache
+        run: |
+          if mkdir -p "$CACHE_DIR" && [ -w "$CACHE_DIR" ]; then
+            echo "UV_CACHE_DIR=$CACHE_DIR" >> "$GITHUB_ENV"
+            echo "uv cache: $CACHE_DIR"
+          else
+            echo "::warning::uv cache dir $CACHE_DIR is not writable; using uv's default cache"
+          fi
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ inputs.python-version }}
@@ -630,6 +660,21 @@ jobs:
           fi
           if [ -s "$OTELSPAN_HELPER" ]; then
             bash "$OTELSPAN_HELPER" context --env-file "$OTELSPAN_ENV_FILE" || true
+          fi
+      # Self-hosted runners share one uv cache per runner host (uv's cache is safe for concurrent
+      # use), so a job's `uv sync` is mostly hardlinks. Only the cache is shared: never .venv.
+      # Hosted runners keep uv's default cache dir (setup-uv's cache is not pinned yet; docs/CI-SPEED.md).
+      - name: Warm uv cache (self-hosted runner-local dir)
+        if: ${{ runner.environment == 'self-hosted' }}
+        shell: bash
+        env:
+          CACHE_DIR: ${{ runner.tool_cache }}/uv-cache
+        run: |
+          if mkdir -p "$CACHE_DIR" && [ -w "$CACHE_DIR" ]; then
+            echo "UV_CACHE_DIR=$CACHE_DIR" >> "$GITHUB_ENV"
+            echo "uv cache: $CACHE_DIR"
+          else
+            echo "::warning::uv cache dir $CACHE_DIR is not writable; using uv's default cache"
           fi
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
