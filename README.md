@@ -43,6 +43,11 @@ the YAML.
    A merge to this repo's `main` changes nothing for you: you keep running the commit you
    pinned until you move the pin yourself.
 
+   If the diff is docs-only, `reusable-python.yml` takes a `skip-reason: "<why>"` input: the job
+   still runs, under its normal `<job> / python tests` name, and goes green without running a suite.
+   It skips the python tests only — secret scanning, claims and every release or identity gate still
+   run. See [docs/CI-SPEED.md](docs/CI-SPEED.md).
+
 3. Read the result:
 
    ```sh

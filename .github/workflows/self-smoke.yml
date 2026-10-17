@@ -260,6 +260,22 @@ jobs:
       pytest-args: "--timeout=30 -q"
       pytest-workers: "6"
 
+  # The docs-only escape hatch, called for real: a caller that classified the diff as docs-only
+  # passes skip-reason and this job still reports under its normal name ("<this job> / python
+  # tests"), green, without running a suite (project-home#297 ran 1,764 tests for a docs-only PR).
+  # A skipped caller job would report as "<this job>" and never satisfy a branch rule that requires
+  # the python check — so a green check here, under that name, is the proof. The reason's notice and
+  # job-summary lines are asserted in tests/test_workflow_contracts.py, which can run the step.
+  python-docs-only:
+    name: python template, skip-reason
+    uses: ./.github/workflows/reusable-python.yml
+    with:
+      project-directory: "fixtures/py-demo"
+      sync-args: "--extra test"
+      pytest-args: "--timeout=30 -q"
+      pytest-workers: "6"
+      skip-reason: "self-smoke: docs-only diff, nothing to test"
+
   # The template's selection step, called for real on a hosted runner. A push to main saves testmon
   # data to the actions cache, so a PR may run affected or full; either way the job summary says
   # which and why (the decision logic itself is unit-tested in tests/test_workflow_contracts.py).

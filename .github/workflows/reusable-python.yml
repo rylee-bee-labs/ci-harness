@@ -10,6 +10,12 @@ name: reusable-python
 # Every action SHA below comes from pins/ACTIONS.md — the single pinning
 # source. Consumers declare ~5 lines per job; see README.md.
 #
+# `skip-reason` (the test job only) lets a caller that classified the diff as docs-only
+# keep the required check name green without paying for a suite with nothing to test:
+# a skipped caller job reports as "<caller job>", never as "<caller job> / python tests".
+# Only the python test job is affected — secret scanning, claims and every release or
+# identity gate are separate jobs the caller keeps. Empty (the default): unchanged.
+#
 # Telemetry: every job emits a pipeline span and a job span through
 # scripts/otel-span.sh, using OpenTelemetry's CI/CD and VCS semantic
 # conventions (homelab docs/observability/TELEMETRY-CONTRACT.md §3). OpenTelemetry
@@ -90,6 +96,18 @@ on:
         type: string
         required: false
         default: all
+      skip-reason:
+        description: >-
+          Skip the test work and say why. The job still runs, under its normal name ("<caller job> /
+          python tests"), and goes green: a caller that skips the whole job reports as "<caller job>",
+          never as "<caller job> / python tests", so a branch rule requiring the python check would
+          never see it. Every step after checkout is skipped and the reason is printed as a notice and
+          written to the job summary. Only for a caller that classified the diff as docs-only (nothing
+          to test): it is not a way to skip security, release or identity gates — those are separate
+          jobs (secret scan, claims) the caller keeps. Empty (the default) runs everything unchanged.
+        type: string
+        required: false
+        default: ""
       timeout-minutes:
         description: >-
           Timeout for every job in this workflow (test, ruff, bandit), in minutes. A hung
@@ -175,6 +193,23 @@ jobs:
           # Depth 2 keeps both parents of a pull_request merge commit, so the base tip is HEAD^1.
           fetch-depth: 2
 
+      # skip-reason: the job keeps running under its normal name, so the check a branch rule
+      # requires still arrives, but every step after checkout is skipped. Preflight and checkout
+      # still run, so the workspace is left exactly as a real run leaves it. The reason comes in
+      # through the environment, never spliced into the workflow command, and newlines are folded
+      # to spaces before it is printed, so a reason cannot start a second workflow command.
+      - name: Tests skipped (skip-reason)
+        if: ${{ inputs.skip-reason != '' }}
+        shell: bash
+        env:
+          SKIP_REASON: ${{ inputs.skip-reason }}
+        run: |
+          # Newlines fold to spaces first: an embedded newline would otherwise start a second workflow command.
+          reason="${SKIP_REASON//$'\r'/ }"
+          reason="${reason//$'\n'/ }"
+          echo "::notice title=tests skipped::$reason"
+          printf '### tests skipped\n\n%s\n\n' "$reason" >> "$GITHUB_STEP_SUMMARY"
+
 # Telemetry is observation, never authority: this step cannot fail the job
       # (continue-on-error) and the helper exits 0 even when the Collector is
       # unreachable. The endpoint arrives through the standard OTEL environment
@@ -183,6 +218,7 @@ jobs:
       # would be estate-specific discovery the contract explicitly rules out.
       # An unset variable is simply empty, which means off.
       - name: OpenTelemetry context
+        if: ${{ inputs.skip-reason == '' }}
         continue-on-error: true
         shell: bash
         env:
@@ -223,7 +259,7 @@ jobs:
       # use), so a job's `uv sync` is mostly hardlinks. Only the cache is shared: never .venv.
       # Hosted runners use setup-uv's cache instead (the step after Bootstrap uv).
       - name: Warm uv cache (self-hosted runner-local dir)
-        if: ${{ runner.environment == 'self-hosted' }}
+        if: ${{ inputs.skip-reason == '' && runner.environment == 'self-hosted' }}
         shell: bash
         env:
           CACHE_DIR: ${{ runner.tool_cache }}/uv-cache
@@ -235,20 +271,23 @@ jobs:
             echo "::warning::uv cache dir $CACHE_DIR is not writable; using uv's default cache"
           fi
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        if: ${{ inputs.skip-reason == '' }}
         with:
           python-version: ${{ inputs.python-version }}
       - name: Bootstrap uv
+        if: ${{ inputs.skip-reason == '' }}
         run: pip install uv==${{ inputs.uv-version }}
       # Hosted runners: restore and save uv's package cache through setup-uv (keyed on uv.lock).
       # Self-hosted runners use the runner-local UV_CACHE_DIR set above instead.
       - name: Warm uv cache (hosted, setup-uv)
-        if: ${{ runner.environment == 'github-hosted' }}
+        if: ${{ inputs.skip-reason == '' && runner.environment == 'github-hosted' }}
         uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           version: ${{ inputs.uv-version }}
           enable-cache: true
           cache-dependency-glob: "**/uv.lock"
       - name: Sync locked dependencies
+        if: ${{ inputs.skip-reason == '' }}
         run: uv sync --frozen ${{ inputs.sync-args }}
       # Hosted testmon store (pytest-select=affected only): runners are throwaway, so the data goes
       # through actions/cache. A push to the default branch saves it under a key that ends in the
@@ -259,7 +298,7 @@ jobs:
       # runner-local store instead.
       - name: Testmon cache key (hosted)
         id: testmon-key
-        if: ${{ runner.environment == 'github-hosted' && inputs.pytest-select == 'affected' }}
+        if: ${{ inputs.skip-reason == '' && runner.environment == 'github-hosted' && inputs.pytest-select == 'affected' }}
         shell: bash
         env:
           PROJECT_DIR: ${{ inputs.project-directory }}
@@ -271,7 +310,7 @@ jobs:
           fi
       - name: Restore testmon data (hosted, pull_request)
         id: testmon-restore
-        if: ${{ runner.environment == 'github-hosted' && inputs.pytest-select == 'affected' && github.event_name == 'pull_request' && steps.testmon-key.outputs.base != '' }}
+        if: ${{ inputs.skip-reason == '' && runner.environment == 'github-hosted' && inputs.pytest-select == 'affected' && github.event_name == 'pull_request' && steps.testmon-key.outputs.base != '' }}
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/testmon-hosted/.testmondata
@@ -279,6 +318,7 @@ jobs:
       # pytest-select=affected: decide, before running anything, whether this run may use testmon
       # data, and say which mode ran and why. Every doubt resolves to the full suite.
       - name: Select tests (full or affected)
+        if: ${{ inputs.skip-reason == '' }}
         shell: bash
         env:
           PYTEST_SELECT: ${{ inputs.pytest-select }}
@@ -373,6 +413,7 @@ jobs:
       # junit-xml goes to RUNNER_TEMP (outside the workspace, so it cannot be committed or
       # picked up by a repo's own globbing); the next two steps read it even when pytest failed.
       - name: Run pytest
+        if: ${{ inputs.skip-reason == '' }}
         env:
           PYTEST_WORKERS: ${{ inputs.pytest-workers }}
           JUNIT_XML: ${{ runner.temp }}/pytest-junit.xml
@@ -485,7 +526,7 @@ jobs:
       # Only a green refresh run reaches here with PYTEST_PUBLISHED=1 (the Run pytest step failed
       # otherwise). Keys are per commit, so a save never collides with an older entry.
       - name: Save testmon data (hosted, push to default branch)
-        if: ${{ success() && runner.environment == 'github-hosted' && inputs.pytest-select == 'affected' && github.event_name == 'push' && github.ref_name == github.event.repository.default_branch && env.PYTEST_PUBLISHED == '1' }}
+        if: ${{ inputs.skip-reason == '' && success() && runner.environment == 'github-hosted' && inputs.pytest-select == 'affected' && github.event_name == 'push' && github.ref_name == github.event.repository.default_branch && env.PYTEST_PUBLISHED == '1' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/testmon-hosted/.testmondata
@@ -493,7 +534,7 @@ jobs:
       # Failing test names and short tracebacks only, written to the job summary so a red run
       # is readable without opening the raw log. Passing tests are never listed.
       - name: Pytest failures to job summary
-        if: ${{ always() }}
+        if: ${{ always() && inputs.skip-reason == '' }}
         continue-on-error: true
         shell: bash
         env:
@@ -535,7 +576,7 @@ jobs:
               print(f"\n... {len(bad) - MAX_TESTS} more failing tests; see the pytest-junit artifact")
           PY
       - name: Upload pytest junit-xml
-        if: ${{ always() }}
+        if: ${{ always() && inputs.skip-reason == '' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ${{ inputs.junit-artifact-name }}
@@ -543,7 +584,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
       - name: Repo-owned post-test gates
-        if: ${{ inputs.post-test-commands != '' }}
+        if: ${{ inputs.skip-reason == '' && inputs.post-test-commands != '' }}
         run: |
           set -euo pipefail
           ${{ inputs.post-test-commands }}
@@ -553,7 +594,7 @@ jobs:
       # (a gated `if: inputs.enable-*` job) never reaches this step either, which
       # is equally honest.
       - name: OpenTelemetry spans
-        if: ${{ always() }}
+        if: ${{ always() && inputs.skip-reason == '' }}
         continue-on-error: true
         shell: bash
         env:

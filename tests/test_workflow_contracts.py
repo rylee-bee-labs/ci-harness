@@ -122,7 +122,9 @@ class PythonTemplateTest(unittest.TestCase):
         self.assertIn(">> \"$GITHUB_STEP_SUMMARY\"", self.text)
         self.assertIn("actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a", self.text)
         for step in ("Pytest failures to job summary", "Upload pytest junit-xml"):
-            self.assertRegex(self.text, rf"name: {step}\n        if: \$\{{\{{ always\(\) \}}\}}")
+            # always() so a red run still reports, and the skip-reason guard so a skipped run
+            # does not write "no test report was written" over the real reason.
+            self.assertRegex(self.text, rf"name: {step}\n        if: \$\{{\{{ always\(\) && inputs\.skip-reason == '' \}}\}}")
 
 
     def test_summary_script_lists_only_failures(self) -> None:
@@ -144,6 +146,99 @@ class PythonTemplateTest(unittest.TestCase):
         self.assertIn("t::test_bad", out)
         self.assertIn("assert 1 == 2", out)
         self.assertNotIn("test_ok", out)
+
+
+class SkipReasonTest(unittest.TestCase):
+    """`skip-reason` keeps the required check name green without running a suite with nothing to test.
+
+    A caller that skips its `test:` job entirely reports as "test", never "test / python tests", so a
+    branch rule that requires the python check would never see it (project-home#297, a docs-only PR that
+    ran 1,764 tests). The job has to run under its normal name and succeed, so the skip lives inside
+    the template, behind one optional input.
+    """
+
+    text = read("reusable-python.yml")
+    job = jobs_in(text)["test"]
+
+    def input_block(self) -> str:
+        block = self.text.split("      skip-reason:\n", 1)[1].split("      timeout-minutes:", 1)[0]
+        return block
+
+    def test_input_is_optional_string_defaulting_to_empty(self) -> None:
+        block = self.input_block()
+        self.assertIn("type: string", block)
+        self.assertIn("required: false", block)
+        self.assertIn('default: ""', block)
+        # Who may set it, and what it is not allowed to touch.
+        self.assertIn("docs-only", block)
+        self.assertIn("<caller job> / python tests", block)
+        self.assertIn("secret scan, claims", block)
+
+    def test_every_step_after_checkout_is_guarded(self) -> None:
+        body = "\n".join(self.job)
+        after_checkout = body.split("- uses: actions/checkout", 1)[1]
+        steps = re.split(r"\n      - (?:name|uses): ", "\n" + after_checkout)[1:]
+        self.assertGreaterEqual(len(steps), 15)  # the whole test job, minus preflight and checkout
+        for step in steps:
+            name = step.splitlines()[0]
+            with self.subTest(step=name):
+                if name.startswith("actions/checkout"):  # the checkout line itself, not a step
+                    continue
+                cond = re.search(r"^        if: (.*)$", step, re.M)
+                self.assertIsNotNone(cond, f"{name} has no if: after checkout")
+                self.assertIn("inputs.skip-reason", cond.group(1), name)
+
+    def test_preflight_and_checkout_still_run(self) -> None:
+        # A skipped run still leaves the workspace as a real one does; and the guard must not
+        # change the job's name, which is the check branch rules require.
+        body = "\n".join(self.job)
+        self.assertIn("      - name: Preflight (workspace and scratch writable)\n", body)
+        self.assertIn("    name: python tests\n", body)
+        for line in body.splitlines()[:2]:
+            self.assertNotIn("if:", line)
+
+    def test_only_the_test_job_is_affected(self) -> None:
+        for job in ("ruff", "bandit"):
+            body = "\n".join(jobs_in(self.text)[job])
+            self.assertNotIn("skip-reason", body, job)
+        # The other templates do not know the input at all: callers keep their gates.
+        for path in TEMPLATES:
+            if path.name != "reusable-python.yml":
+                self.assertNotIn("skip-reason", path.read_text(), path.name)
+
+    def test_the_notice_step_reports_the_reason_verbatim(self) -> None:
+        script = step_script(self.text, "Tests skipped (skip-reason)")
+        # The reason arrives through the environment, never spliced into the workflow, so whatever
+        # a caller passes is printed and summarised but cannot change what the job runs.
+        self.assertIn("SKIP_REASON: ${{ inputs.skip-reason }}", self.text)
+        self.assertNotIn("${{ inputs.skip-reason }}", script)
+        for reason in ("docs-only diff: no .py changed", "50% off: PR #297 is markdown only"):
+            with self.subTest(reason=reason):
+                d = tempfile.TemporaryDirectory()
+                self.addCleanup(d.cleanup)
+                root = Path(d.name)
+                (root / "summary").write_text("")
+                proc = subprocess.run(
+                    ["bash", "-e", "-c", script],
+                    env={"PATH": "/usr/bin:/bin", "SKIP_REASON": reason,
+                         "GITHUB_STEP_SUMMARY": str(root / "summary")},
+                    capture_output=True, text=True,
+                )
+                self.assertEqual(proc.returncode, 0, proc.stderr)  # never fails the job
+                self.assertIn(f"::notice title=tests skipped::{reason}", proc.stdout)
+                self.assertIn("### tests skipped", (root / "summary").read_text())
+                self.assertIn(reason, (root / "summary").read_text())
+
+    def test_guard_is_true_for_an_empty_reason(self) -> None:
+        # Every guard is `skip-reason == ''` (or a conjunction with it), so the default run is the
+        # old run: nothing new is executed, nothing old is dropped.
+        guards = re.findall(r"^        if: .*inputs\.skip-reason == ''.*$", "\n".join(self.job), re.M)
+        self.assertEqual(len(guards), len(re.findall(r"^        if: .*inputs\.skip-reason.*$", "\n".join(self.job), re.M)) - 1)
+        for cond in guards:
+            with self.subTest(cond=cond):
+                self.assertTrue(
+                    cond.startswith("        if: ${{ inputs.skip-reason == ''") or
+                    "always() && inputs.skip-reason == '' }}" in cond, cond)
 
 
 def step_script(text: str, name: str) -> str:
@@ -624,8 +719,12 @@ class HostedUvCacheTest(unittest.TestCase):
         text = read("reusable-python.yml")
         jobs = len(re.findall(r"^    runs-on:", text, re.M))
         self.assertEqual(text.count("astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0"), jobs)
-        self.assertEqual(text.count("if: ${{ runner.environment == 'github-hosted' }}"), jobs)
         self.assertEqual(text.count("enable-cache: true"), jobs)
+        # Every job's setup-uv step is gated on a hosted runner; the test job's condition also
+        # carries the skip-reason guard, so match the condition that belongs to the step.
+        hosted = re.findall(
+            r"name: Warm uv cache \(hosted, setup-uv\)\n        if: [^\n]*runner\.environment == 'github-hosted'", text)
+        self.assertEqual(len(hosted), jobs)
         self.assertIn("astral-sh/setup-uv", (WF.parent.parent / "pins" / "ACTIONS.md").read_text())
 
 
