@@ -1,5 +1,26 @@
 # CI speed knobs (reusable-python / reusable-node)
 
+## skip-reason: a docs-only diff, without losing the check
+
+`skip-reason: "<why>"` (default empty) runs no tests and reports why. Default: everything below runs.
+
+- **Why it exists.** A skipped caller job reports as `<caller job>`, never as `<caller job> / python tests`,
+  so a branch rule that requires the python check would never see it and the PR would be blocked.
+  project-home#297 ran 1,764 backend tests for a docs-only PR. With `skip-reason` the job still runs, under
+  its normal name, and goes green in seconds.
+- **What it does.** Preflight and checkout run; every step after checkout is skipped (uv, the sync, the
+  testmon cache, pytest, the junit artifact and its summary, the post-test gates, the telemetry pair). One
+  step prints `::notice title=tests skipped::<reason>` and writes the reason to the job summary, so a green
+  check always says what it skipped.
+- **Who may set it.** Only a caller that classified the diff as docs-only — nothing to test. It is not a
+  way to skip a security, release or identity gate: secret scanning, claims and those gates are separate
+  jobs (or separate steps the caller owns) that this input does not touch, and it changes nothing in
+  `reusable-node`, `reusable-uat`, `reusable-container-smoke`, `reusable-claims-policy`,
+  `reusable-secret-scan` or `reusable-project-home`. It never deletes a test either.
+- **Proved by** self-smoke's `python-docs-only` job (green under the normal check name) and by the
+  contracts in `tests/test_workflow_contracts.py` (every step after checkout is guarded, the notice step's
+  real output, the input's default and documentation).
+
 ## pytest-select: affected tests on PRs
 
 `pytest-select: affected` runs only the tests pytest-testmon says a pull request touched.

@@ -60,7 +60,7 @@ caps at four sections and under 400 words.
 
 | Workflow | Shape |
 |---|---|
-| `reusable-python.yml` | uv + `uv sync --frozen` + repo-given pytest args (junit-xml artifact, failing tests + short tracebacks in the job summary, `timeout-minutes` input default 30 on every job), optional repo gates after pytest, optional ruff/bandit jobs |
+| `reusable-python.yml` | uv + `uv sync --frozen` + repo-given pytest args (junit-xml artifact, failing tests + short tracebacks in the job summary, `timeout-minutes` input default 30 on every job), optional repo gates after pytest, optional ruff/bandit jobs; optional `skip-reason` input (docs-only diffs: the job still runs and stays green under its required check name, every step after checkout skipped and the reason notified — python tests only, never a security/release/identity gate; see [docs/CI-SPEED.md](docs/CI-SPEED.md)) |
 | `reusable-node.yml` | setup-node + `npm ci` + optional build/lint/test + dist artifact upload; optional Python/uv bootstrap for polyglot e2e (Playwright on a uvicorn app) |
 | `reusable-container-smoke.yml` | docker build + detached run + configurable healthz curl retry loop, with container logs on failure |
 | `reusable-contract-freshness.yml` | shallow-clone the Play-Nice contract source over https, run `contractctl freshness --manifest <caller manifest> --json`; exit 0 only on CURRENT (fail closed) |
