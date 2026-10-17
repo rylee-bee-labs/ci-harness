@@ -278,7 +278,7 @@ jobs:
         # than trusting a green job (the decision logic itself is unit-tested in
         # tests/test_workflow_contracts.py). It writes them to the job summary AND exports them; a
         # later step can only check the export, because GITHUB_STEP_SUMMARY is a new file per step.
-        case "${PYTEST_MODE:-}" in full|affected) ;; *) echo "::error::PYTEST_MODE is '${PYTEST_MODE:-}'"; exit 1 ;; esac
+        case "${PYTEST_MODE:-}" in full|affected|refresh) ;; *) echo "::error::PYTEST_MODE is '${PYTEST_MODE:-}'"; exit 1 ;; esac
         [ -n "${PYTEST_MODE_REASON//[[:space:]]/}" ] || { echo "::error::PYTEST_MODE_REASON is empty"; exit 1; }
         echo "pytest mode: $PYTEST_MODE ($PYTEST_MODE_REASON)"
 

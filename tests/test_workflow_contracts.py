@@ -681,3 +681,19 @@ class TestmonPruneKeepsSiblingStores(unittest.TestCase):
 if __name__ == "__main__":
     unittest.main()
 
+
+
+def test_self_smoke_accepts_every_mode_the_python_template_can_select():
+    """ci-harness#62: the template's selector can `decide` refresh on a push to the default branch, and the
+    self-smoke rejected it, so main went red. Every mode the template can select must be in the check."""
+    import re
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1]
+    template = (root / ".github" / "workflows" / "reusable-python.yml").read_text()
+    smoke = (root / ".github" / "workflows" / "self-smoke.yml").read_text()
+    modes = set(re.findall(r"\bdecide ([a-z]+) ", template))
+    assert modes, "found no `decide <mode>` in the python template"
+    allowed = re.search(r'case "\$\{PYTEST_MODE:-\}" in ([a-z|]+)\)', smoke)
+    assert allowed, "found no PYTEST_MODE case in self-smoke"
+    missing = modes - set(allowed.group(1).split("|"))
+    assert not missing, f"self-smoke rejects modes the template can select: {sorted(missing)}"
