@@ -196,16 +196,19 @@ jobs:
       # skip-reason: the job keeps running under its normal name, so the check a branch rule
       # requires still arrives, but every step after checkout is skipped. Preflight and checkout
       # still run, so the workspace is left exactly as a real run leaves it. The reason comes in
-      # through the environment, never spliced into the workflow command, so a reason containing
-      # `%`, `:` or a newline cannot forge one.
+      # through the environment, never spliced into the workflow command, and newlines are folded
+      # to spaces before it is printed, so a reason cannot start a second workflow command.
       - name: Tests skipped (skip-reason)
         if: ${{ inputs.skip-reason != '' }}
         shell: bash
         env:
           SKIP_REASON: ${{ inputs.skip-reason }}
         run: |
-          echo "::notice title=tests skipped::$SKIP_REASON"
-          printf '### tests skipped\n\n%s\n\n' "$SKIP_REASON" >> "$GITHUB_STEP_SUMMARY"
+          # Newlines fold to spaces first: an embedded newline would otherwise start a second workflow command.
+          reason="${SKIP_REASON//$'\r'/ }"
+          reason="${reason//$'\n'/ }"
+          echo "::notice title=tests skipped::$reason"
+          printf '### tests skipped\n\n%s\n\n' "$reason" >> "$GITHUB_STEP_SUMMARY"
 
 # Telemetry is observation, never authority: this step cannot fail the job
       # (continue-on-error) and the helper exits 0 even when the Collector is
