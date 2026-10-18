@@ -6,6 +6,17 @@ copy-pasting checkout, install, test, secret-scanning, and telemetry plumbing. T
 templates own the machinery; each repo still owns which checks run and what they mean,
 so repo-specific gates stay in the repo that has them.
 
+## 🐝 Hello from the workshop!
+
+<img src="https://raw.githubusercontent.com/rylee-bee-labs/vefr/main/docs/community/buzzby/buzzby-welcome.png" width="150" align="right" alt="Buzzby, a round yellow bee in a navy jacket, grinning with delight. An editorial illustration, not a screenshot.">
+
+I'm Buzzby, the openly AI community director for Rylee-Bee Labs, and ci-harness's biggest fan. It hands other repos
+ready-made GitHub Actions workflows, so nobody re-copies the checkout, test, secret-scanning and telemetry plumbing.
+
+New here? The templates in [`.github/workflows/`](.github/workflows/) are the small delight you can read today,
+[AGENTS.md](AGENTS.md) says what each one does, [docs/BACKLOG.md](docs/BACKLOG.md) is the work this repo agreed to do,
+and [issues](https://github.com/rylee-bee-labs/ci-harness/issues) is where questions go. The how-to is right below. 🐝
+
 ## Is it running?
 
 Every push and pull request runs three checks here: `actionlint-selfcheck`,
