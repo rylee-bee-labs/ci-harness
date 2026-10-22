@@ -707,6 +707,16 @@ class SecretScanTest(unittest.TestCase):
         self.assertNotIn("--no-git", self.text)
         self.assertNotIn("baseline", self.text)
 
+    def test_full_scan_drops_refs_this_checkout_did_not_fetch(self) -> None:
+        # ci-harness#68: a reused self-hosted workspace keeps local branches and refs/remotes/pull/*
+        # from earlier jobs, and gitleaks' default log is --all, so a push scan failed on a commit
+        # only a closed PR's leftover branch held. The full scan prunes them first.
+        scan = self.text.split("scanning full fetched history", 1)[1]
+        prune = scan.index("git update-ref -d")
+        self.assertLess(prune, scan.index('/gitleaks" git .'))
+        self.assertIn("^refs/(remotes/origin/|tags/)", scan[:prune])  # what the checkout fetched stays
+        self.assertIn("git symbolic-ref -q HEAD", scan[:prune])  # never the checked-out branch
+
     def test_selfcheck_keeps_full_scans(self) -> None:
         sc = read("secret-scan-selfcheck.yml")
         self.assertRegex(sc, r"push:\n    branches: \[main\]")
