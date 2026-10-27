@@ -117,8 +117,13 @@ class ContractFreshnessGraceTest(unittest.TestCase):
             self.assertNotIn("github.step_summary", path.read_text(), path.relative_to(WF))
         gate = step_script(self.template, "Contract freshness gate (fail closed)")
         current = gate.split('  current)\n', 1)[1].split('  noncurrent)\n', 1)[0]
-        self.assertIn('echo "### Contract freshness grace" >> "$GITHUB_STEP_SUMMARY"', current)
-        self.assertIn('echo "$message" >> "$GITHUB_STEP_SUMMARY"', current)
+        self.assertIn(
+            '          {\n'
+            '            echo "### Contract freshness grace"\n'
+            '            echo "$message"\n'
+            '          } >> "$GITHUB_STEP_SUMMARY"',
+            current,
+        )
 
     def test_grace_input_and_output_are_public_with_safe_defaults(self) -> None:
         inputs = self.template.split("      grace-days:\n", 1)[1].split("    outputs:\n", 1)[0]

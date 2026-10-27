@@ -63,9 +63,9 @@ on:
         required: true
       expect:
         description: >-
-          Required verdict. DEFAULT "current" = consumer semantics: red on
-          DIVERGED / UNREACHABLE / UNKNOWN fail immediately; BEHIND fails
-          after `grace-days`. The
+          Required verdict. DEFAULT "current" is red immediately on
+          DIVERGED, UNREACHABLE and UNKNOWN, and red on BEHIND once the
+          oldest unadopted upstream commit is older than `grace-days`. The
           harness's self-smoke passes "noncurrent" against a permanently
           stale fixture: the job goes GREEN exactly when the gate correctly
           refuses the drifted pin — GitHub forbids continue-on-error on
@@ -202,9 +202,11 @@ jobs:
           cat "$JSON_OUT"
           status=$(FRESHNESS_JSON="$JSON_OUT" python3 -c 'import json, os; print(json.load(open(os.environ["FRESHNESS_JSON"])).get("status", "UNKNOWN"))' 2>/dev/null) || status=UNKNOWN
           detail=$(FRESHNESS_JSON="$JSON_OUT" python3 -c 'import json, os; print(json.load(open(os.environ["FRESHNESS_JSON"])).get("detail", "")[:300])' 2>/dev/null) || detail=""
-          echo "exit-code=$rc" >> "$GITHUB_OUTPUT"
-          echo "status=$status" >> "$GITHUB_OUTPUT"
-          echo "within_grace=false" >> "$GITHUB_OUTPUT"
+          {
+            echo "exit-code=$rc"
+            echo "status=$status"
+            echo "within_grace=false"
+          } >> "$GITHUB_OUTPUT"
           case "$EXPECT" in
             current)
               if [ "$rc" -ne 0 ]; then
@@ -256,7 +258,7 @@ jobs:
               pin = git("rev-parse", "--verify", f"{pin}^{{commit}}")
               head = git("rev-parse", "--verify", f"refs/remotes/origin/{freshness_ref}^{{commit}}")
               if subprocess.run(["git", "-C", repo, "merge-base", "--is-ancestor", pin, head]).returncode != 0:
-                  raise ValueError("pin is not an ancestor of upstream main")
+                  raise ValueError(f"pin is not an ancestor of upstream {freshness_ref}")
               commits = git("rev-list", "--reverse", "--ancestry-path", f"{pin}..{head}").splitlines()
               if not commits:
                   raise ValueError("BEHIND has no unadopted commits")
@@ -282,8 +284,10 @@ jobs:
                     echo "within_grace=true" >> "$GITHUB_OUTPUT"
                     message=$(GRACE_JSON="$grace" python3 -c 'import json,os; d=json.loads(os.environ["GRACE_JSON"]); print("BEHIND pin %s…; upstream %s %s…; grace %s days expires %s (oldest unadopted commit age %.2f days)" % (d["pin"][:12], d["ref"], d["head"][:12], d["grace"], d["expires"], d["age"]))')
                     echo "::warning::contract freshness: $message"
-                    echo "### Contract freshness grace" >> "$GITHUB_STEP_SUMMARY"
-                    echo "$message" >> "$GITHUB_STEP_SUMMARY"
+                    {
+                      echo "### Contract freshness grace"
+                      echo "$message"
+                    } >> "$GITHUB_STEP_SUMMARY"
                     exit 0
                   fi
                 fi
@@ -302,8 +306,10 @@ jobs:
             warn)
               if [ "$rc" -ne 0 ]; then
                 echo "::warning::Play-Nice moved (status=$status): this PR is not blocked; the pin robot opens a separate pin PR. ${detail}"
-                echo "### Play-Nice moved ($status)" >> "$GITHUB_STEP_SUMMARY"
-                echo "Not blocking this PR. The pin robot opens a separate pin PR; the default branch and the weekly check stay strict." >> "$GITHUB_STEP_SUMMARY"
+                {
+                  echo "### Play-Nice moved ($status)"
+                  echo "Not blocking this PR. The pin robot opens a separate pin PR; the default branch and the weekly check stay strict."
+                } >> "$GITHUB_STEP_SUMMARY"
               else
                 echo "CURRENT — verdict green"
               fi
