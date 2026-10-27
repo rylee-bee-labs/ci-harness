@@ -193,11 +193,12 @@ malformed or missing manifests, and any uncomputable age remain red immediately.
 `grace-days: 0` restores strict BEHIND behavior. This delays a failure only: it never skips
 the contract check or permits adopting below the pinned Play-Nice floor. The tool's JSON verdict
 is printed, and `exit-code` / `status` / `within_grace` are exposed as job outputs so a caller can assert on
-the verdict without parsing logs. The default `expect: current` input means red on other
-drift; `expect: warn` (for pull requests in a repo whose pin moves by robot,
+the verdict without parsing logs. `expect: current` fails on DIVERGED, UNREACHABLE, UNKNOWN,
+malformed input, and uncomputable grace; `expect: warn` (for pull requests in a repo whose pin moves by robot,
 `tools/pin-sync` in play-nice-contracts) passes with a visible warning and keeps the real
-verdict in `status`; `expect: noncurrent` is the harness's own self-smoke inversion (see
-below) and is not a soft-fail knob.
+verdict in `status`; `expect: noncurrent` inverts the `current` arm's full decision,
+grace included, rather than bypassing it. It is the harness's own self-smoke inversion
+(see below), not a soft-fail knob.
 
 **Detection is automated; pin movement is manual.** A red freshness job means: read what
 changed upstream (verify commit + VERSION/CHANGELOG + lock diff, re-read, re-attest), then
@@ -206,11 +207,12 @@ knowingly. There is deliberately no sync job here, and there never will be.
 
 self-smoke proves both verdicts as POSITIVE assertions on every run: the committed
 current-pin fixture must pass through the real `uses:` call; a permanently stale fixture must
-exit nonzero — proven by an inversion job (`expect: noncurrent`, green exactly when the gate
-correctly goes red, because GitHub forbids `continue-on-error` on `uses:` jobs) plus an
-assertion job on the probe's propagated outputs. The grace proofs cover both sides: one
-stale pin passes inside a deliberately huge window, while another is green only because the
-gate stayed red with `grace-days: 0`; both assert the propagated `within_grace` output. A
+exit nonzero — proven by an inversion job (`expect: noncurrent`, green exactly when the
+current-arm decision fails, because GitHub forbids `continue-on-error` on `uses:` jobs) plus
+an assertion job on the probe's propagated outputs. The grace proofs cover both sides: one
+stale pin passes inside a deliberately huge window; the zero-grace inversion is green only
+while the current arm still fails at `grace-days: 0`. Both assert the propagated
+`within_grace` output. A
 manifest generated live from
 `git ls-remote` at run time must read CURRENT, so the green-path witness never rots when the
 library moves. The committed current-pin fixture declares `update: automatic`, so a

@@ -454,8 +454,8 @@ jobs:
           test "$PROBE_GRACE" = true
           echo "OK: BEHIND passed only inside grace; real status and tool exit remain exposed"
 
-  # Zero grace preserves today's strict behavior and exercises the existing
-  # positive inversion pattern without removing the permanently stale probe.
+  # With a window that never expired, the current arm would pass at zero grace
+  # and this inversion job would go red. It now proves the shared grace decision.
   contract-freshness-no-grace:
     name: contract freshness — zero grace (green iff gate correctly red)
     uses: ./.github/workflows/reusable-contract-freshness.yml

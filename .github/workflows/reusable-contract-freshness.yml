@@ -66,12 +66,11 @@ on:
           Required verdict. DEFAULT "current" is red immediately on
           DIVERGED, UNREACHABLE and UNKNOWN, and red on BEHIND once the
           oldest unadopted upstream commit is older than `grace-days`. The
-          harness's self-smoke passes "noncurrent" against a permanently
-          stale fixture: the job goes GREEN exactly when the gate correctly
-          refuses the drifted pin — GitHub forbids continue-on-error on
-          uses: jobs, so this inversion is an explicit, readable input,
-          never a swallowed failure. "noncurrent" accepts exactly
-          BEHIND/DIVERGED with nonzero exit; nothing else. "warn" (for
+          harness's self-smoke uses "noncurrent" as the inversion of the
+          current-arm decision, including its grace window; it goes GREEN
+          exactly when that arm fails. GitHub forbids continue-on-error on
+          uses: jobs, so this is an explicit, readable input, never a
+          swallowed failure. "warn" (for
           pull requests in repos with a pin robot) passes with a visible
           warning on any non-CURRENT verdict; the `status` output still
           carries the real verdict.
@@ -80,8 +79,9 @@ on:
         default: "current"
       grace-days:
         description: >-
-          For expect=current only, delay failure for a BEHIND pin until this many days
-          after the oldest unadopted upstream commit. Does not soften other verdicts.
+          Delay a BEHIND failure until this many days after the oldest unadopted
+          upstream commit. The noncurrent inversion includes this decision.
+          Does not soften other verdicts.
         type: number
         required: false
         default: 3
@@ -202,16 +202,11 @@ jobs:
           cat "$JSON_OUT"
           status=$(FRESHNESS_JSON="$JSON_OUT" python3 -c 'import json, os; print(json.load(open(os.environ["FRESHNESS_JSON"])).get("status", "UNKNOWN"))' 2>/dev/null) || status=UNKNOWN
           detail=$(FRESHNESS_JSON="$JSON_OUT" python3 -c 'import json, os; print(json.load(open(os.environ["FRESHNESS_JSON"])).get("detail", "")[:300])' 2>/dev/null) || detail=""
-          {
-            echo "exit-code=$rc"
-            echo "status=$status"
-            echo "within_grace=false"
-          } >> "$GITHUB_OUTPUT"
-          case "$EXPECT" in
-            current)
-              if [ "$rc" -ne 0 ]; then
-                if [ "$status" = "BEHIND" ]; then
-                  grace=$(python3 - "$MANIFEST" "$CONTRACT_REPO" "$GRACE_DAYS" <<'PY'
+          within=false
+          grace_json=""
+          grace_error=false
+          if [ "$EXPECT" != "warn" ] && [ "$status" = "BEHIND" ] && [ "$rc" -ne 0 ]; then
+            grace_json=$(python3 - "$MANIFEST" "$CONTRACT_REPO" "$GRACE_DAYS" <<'PY'
           import datetime as dt
           import json
           import os
@@ -248,7 +243,8 @@ jobs:
                   ref_match = re.match(r"^\s+ref:\s*([A-Za-z0-9._/-]+)\s*(?:#.*)?$", line)
                   if in_freshness and ref_match:
                       freshness_ref = ref_match.group(1)
-              reported_pin = data.get("pin") or data.get("source_revision") or data.get("source", {}).get("revision") or data.get("revision")
+              source = data.get("source")
+              reported_pin = data.get("pin") or data.get("source_revision") or (source.get("revision") if isinstance(source, dict) else None) or data.get("revision")
               pin = reported_pin or pin
               if pin is None:
                   raise ValueError("missing or malformed source.revision")
@@ -256,9 +252,19 @@ jobs:
                   return subprocess.run(["git", "-C", repo, *args], check=True,
                                         capture_output=True, text=True).stdout.strip()
               pin = git("rev-parse", "--verify", f"{pin}^{{commit}}")
-              head = git("rev-parse", "--verify", f"refs/remotes/origin/{freshness_ref}^{{commit}}")
+              head = None
+              used_ref = None
+              for candidate in (f"refs/remotes/origin/{freshness_ref}", f"refs/tags/{freshness_ref}", freshness_ref):
+                  resolved = subprocess.run(["git", "-C", repo, "rev-parse", "--verify", f"{candidate}^{{commit}}"],
+                                            check=False, capture_output=True, text=True)
+                  if resolved.returncode == 0:
+                      head = resolved.stdout.strip()
+                      used_ref = candidate
+                      break
+              if head is None:
+                  raise ValueError(f"cannot resolve upstream ref {freshness_ref}")
               if subprocess.run(["git", "-C", repo, "merge-base", "--is-ancestor", pin, head]).returncode != 0:
-                  raise ValueError(f"pin is not an ancestor of upstream {freshness_ref}")
+                  raise ValueError(f"pin is not an ancestor of upstream {used_ref}")
               commits = git("rev-list", "--reverse", "--ancestry-path", f"{pin}..{head}").splitlines()
               if not commits:
                   raise ValueError("BEHIND has no unadopted commits")
@@ -269,39 +275,47 @@ jobs:
                   raise ValueError("oldest upstream commit has a future timestamp")
               expires = dt.datetime.fromtimestamp(stamp + grace * 86400, dt.timezone.utc)
               print(json.dumps({"within": age < grace, "age": age, "pin": pin, "head": head,
-                                "ref": freshness_ref,
-                                "grace": grace, "expires": expires.isoformat(), "age": age}))
+                                "ref": freshness_ref, "resolved_ref": used_ref,
+                                "grace": grace, "expires": expires.isoformat()}))
           except Exception as exc:
               print(f"cannot compute BEHIND grace: {exc}", file=sys.stderr)
               sys.exit(1)
           PY
-                  ) || {
-                    echo "::error::contract freshness grace could not be computed; failing closed"
-                    exit "$rc"
-                  }
-                  within=$(GRACE_JSON="$grace" python3 -c 'import json,os; print(str(json.loads(os.environ["GRACE_JSON"])["within"]).lower())')
-                  if [ "$within" = true ]; then
-                    echo "within_grace=true" >> "$GITHUB_OUTPUT"
-                    message=$(GRACE_JSON="$grace" python3 -c 'import json,os; d=json.loads(os.environ["GRACE_JSON"]); print("BEHIND pin %s…; upstream %s %s…; grace %s days expires %s (oldest unadopted commit age %.2f days)" % (d["pin"][:12], d["ref"], d["head"][:12], d["grace"], d["expires"], d["age"]))')
-                    echo "::warning::contract freshness: $message"
-                    {
-                      echo "### Contract freshness grace"
-                      echo "$message"
-                    } >> "$GITHUB_STEP_SUMMARY"
-                    exit 0
-                  fi
-                fi
-                echo "::error::contract freshness gate failed: status=$status (exit $rc) — ${detail:-no verdict detail; check the JSON above} — read what changed upstream, then re-pin source.revision in the manifest manually (a human decision; this check detects drift and never moves pins)"
-                exit "$rc"
-              fi
-              echo "CURRENT — verdict green"
+            ) || grace_error=true
+            if [ "$grace_error" = false ]; then
+              within=$(GRACE_JSON="$grace_json" python3 -c 'import json,os; print(str(json.loads(os.environ["GRACE_JSON"])["within"]).lower())') || grace_error=true
+            fi
+          fi
+          {
+            echo "exit-code=$rc"
+            echo "status=$status"
+            echo "within_grace=$within"
+          } >> "$GITHUB_OUTPUT"
+          decision_pass=false
+          if [ "$rc" -eq 0 ]; then
+            decision_pass=true
+          elif [ "$status" = "BEHIND" ] && [ "$grace_error" = false ] && [ "$within" = true ]; then
+            decision_pass=true
+            message=$(GRACE_JSON="$grace_json" python3 -c 'import json,os; d=json.loads(os.environ["GRACE_JSON"]); print("BEHIND pin %s…; upstream %s %s…; grace %s days expires %s (oldest unadopted commit age %.2f days)" % (d["pin"][:12], d["ref"], d["head"][:12], d["grace"], d["expires"], d["age"]))')
+            echo "::warning::contract freshness: $message"
+            { echo "### Contract freshness grace"; echo "$message"; } >> "$GITHUB_STEP_SUMMARY"
+          elif [ "$status" = "BEHIND" ] && [ "$grace_error" = true ]; then
+            echo "::error::contract freshness grace could not be computed; failing closed"
+          else
+            echo "::error::contract freshness gate failed: status=$status (exit $rc) — ${detail:-no verdict detail; check the JSON above} — read what changed upstream, then re-pin source.revision in the manifest manually (a human decision; this check detects drift and never moves pins)"
+          fi
+          case "$EXPECT" in
+            current)
+              if [ "$decision_pass" = true ]; then echo "CURRENT or within grace — verdict green"; exit 0; fi
+              exit "$rc"
               ;;
             noncurrent)
-              if [ "$rc" -eq 0 ] || { [ "$status" != "BEHIND" ] && [ "$status" != "DIVERGED" ]; }; then
-                echo "::error::self-smoke inversion expects BEHIND or DIVERGED with nonzero exit; got status=$status exit=$rc — the fail-closed gate went soft"
-                exit 1
+              if [ "$decision_pass" = false ]; then
+                echo "current-arm decision correctly failed (status=$status exit=$rc within_grace=$within)"
+                exit 0
               fi
-              echo "stale pin correctly refused (status=$status exit=$rc) — the red path is genuinely red"
+              echo "::error::the fail-closed gate went soft"
+              exit 1
               ;;
             warn)
               if [ "$rc" -ne 0 ]; then
