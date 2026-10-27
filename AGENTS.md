@@ -63,7 +63,7 @@ caps at four sections and under 400 words.
 | `reusable-python.yml` | uv + `uv sync --frozen` + repo-given pytest args (junit-xml artifact, failing tests + short tracebacks in the job summary, `timeout-minutes` input default 30 on every job), optional repo gates after pytest, optional ruff/bandit jobs |
 | `reusable-node.yml` | setup-node + `npm ci` + optional build/lint/test + dist artifact upload; optional Python/uv bootstrap for polyglot e2e (Playwright on a uvicorn app) |
 | `reusable-container-smoke.yml` | docker build + detached run + configurable healthz curl retry loop, with container logs on failure |
-| `reusable-contract-freshness.yml` | shallow-clone the Play-Nice contract source over https, run `contractctl freshness --manifest <caller manifest> --json`; exit 0 only on CURRENT (fail closed) |
+| `reusable-contract-freshness.yml` | blobless full-history clone of Play-Nice over https, run `contractctl freshness --manifest <caller manifest> --json`; default 3-day grace delays only a BEHIND failure, based on the oldest unadopted upstream commit; all other verdicts fail closed |
 | `reusable-uat.yml` | pinned checkout + setup-node (npm cache, conditional `npm ci`) + a caller-supplied real-browser UAT command under a `UAT_READONLY=1` read-only posture with optional `uat-token` passthrough; UAT output uploaded as an artifact (14-day retention) |
 | `reusable-secret-scan.yml` | pinned checkout + the gitleaks CLI (pinned version and sha256; the action needs a paid key for org repos); a repo-local `.gitleaks.toml` allowlists documented false positives instead of suppressing at the harness level. on `pull_request` it scans only the commits the PR adds (`--log-opts base..head`, full fetch forced, fail closed if the range cannot be resolved); on any other event it scans what `fetch-depth` fetched (default 0 = full history) |
 | `reusable-claims-policy.yml` | fetch the canonical honest-claims policy from this repo **at the revision the caller pinned** (`github.workflow_ref`), install conftest, run a canary that proves the policy fires, then gate the PR body or commit message. `mirror-path` additionally proves a repo's vendored bash mirror agrees with the policy. Fail closed on an unreadable body |
@@ -183,15 +183,22 @@ whenever the manifest itself changes:
 ```
 
 Mechanics are fail-closed by construction: the job runs `contractctl freshness --json` from
-a fresh shallow clone of `rylee-bee-labs/play-nice-contracts` and propagates its exit
-code — 0 **only** when the verdict is CURRENT; BEHIND/DIVERGED exit 1;
-UNREACHABLE/UNKNOWN (missing or malformed manifest included) exit 2. The tool's JSON verdict
-is printed, and `exit-code` / `status` are exposed as job outputs so a caller can assert on
-the verdict without parsing logs. The default `expect: current` input means red on ANY
-drift; `expect: warn` (for pull requests in a repo whose pin moves by robot,
+a fresh blobless, full-history clone of `rylee-bee-labs/play-nice-contracts` and propagates its exit
+code — 0 **only** when the verdict is CURRENT, except that `expect: current` may delay a
+BEHIND failure for the default three days. The clock starts at the committer date of the
+oldest upstream commit after the caller's pin, not when the consumer first runs CI. During
+that window the job warns and records the real `BEHIND` status and `within_grace=true`; after
+it expires, BEHIND remains red with the tool's exit code. DIVERGED, UNREACHABLE, UNKNOWN,
+malformed or missing manifests, and any uncomputable age remain red immediately. Setting
+`grace-days: 0` restores strict BEHIND behavior. This delays a failure only: it never skips
+the contract check or permits adopting below the pinned Play-Nice floor. The tool's JSON verdict
+is printed, and `exit-code` / `status` / `within_grace` are exposed as job outputs so a caller can assert on
+the verdict without parsing logs. `expect: current` fails on DIVERGED, UNREACHABLE, UNKNOWN,
+malformed input, and uncomputable grace; `expect: warn` (for pull requests in a repo whose pin moves by robot,
 `tools/pin-sync` in play-nice-contracts) passes with a visible warning and keeps the real
-verdict in `status`; `expect: noncurrent` is the harness's own self-smoke inversion (see
-below) and is not a soft-fail knob.
+verdict in `status`; `expect: noncurrent` inverts the `current` arm's full decision,
+grace included, rather than bypassing it. It is the harness's own self-smoke inversion
+(see below), not a soft-fail knob.
 
 **Detection is automated; pin movement is manual.** A red freshness job means: read what
 changed upstream (verify commit + VERSION/CHANGELOG + lock diff, re-read, re-attest), then
@@ -200,9 +207,13 @@ knowingly. There is deliberately no sync job here, and there never will be.
 
 self-smoke proves both verdicts as POSITIVE assertions on every run: the committed
 current-pin fixture must pass through the real `uses:` call; a permanently stale fixture must
-exit nonzero — proven by an inversion job (`expect: noncurrent`, green exactly when the gate
-correctly goes red, because GitHub forbids `continue-on-error` on `uses:` jobs) plus an
-assertion job on the probe's propagated outputs; and a manifest generated live from
+exit nonzero — proven by an inversion job (`expect: noncurrent`, green exactly when the
+current-arm decision fails, because GitHub forbids `continue-on-error` on `uses:` jobs) plus
+an assertion job on the probe's propagated outputs. The grace proofs cover both sides: one
+stale pin passes inside a deliberately huge window; the zero-grace inversion is green only
+while the current arm still fails at `grace-days: 0`. Both assert the propagated
+`within_grace` output. A
+manifest generated live from
 `git ls-remote` at run time must read CURRENT, so the green-path witness never rots when the
 library moves. The committed current-pin fixture declares `update: automatic`, so a
 docs-only upstream move leaves it CURRENT (the tool's equivalence rule, provable because the

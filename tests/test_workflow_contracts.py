@@ -6,10 +6,13 @@ reusable-python reports failures, and the secret scan stays narrow on PRs but fu
 everywhere else.
 """
 import hashlib
+import json
 import re
 import subprocess
 import sys
 import tempfile
+import textwrap
+import time
 import unittest
 from pathlib import Path
 
@@ -106,6 +109,104 @@ class EveryJobIsBoundedTest(unittest.TestCase):
                         any(line.startswith("    timeout-minutes:") for line in body),
                         f"{path.name}: job {name!r} has no timeout-minutes",
                     )
+
+
+class ContractFreshnessGraceTest(unittest.TestCase):
+    template = read("reusable-contract-freshness.yml")
+    smoke = (WF / "self-smoke.yml").read_text()
+
+    def test_grace_summary_uses_valid_step_summary_variable(self) -> None:
+        for path in sorted(WF.rglob("*.yml")):
+            self.assertNotIn("github.step_summary", path.read_text(), path.relative_to(WF))
+        gate = step_script(self.template, "Contract freshness gate (fail closed)")
+        self.assertIn(
+            '{ echo "### Contract freshness grace"; echo "$message"; } >> "$GITHUB_STEP_SUMMARY"',
+            gate,
+        )
+
+    def test_grace_input_and_output_are_public_with_safe_defaults(self) -> None:
+        inputs = self.template.split("      grace-days:\n", 1)[1].split("    outputs:\n", 1)[0]
+        self.assertIn("type: number", inputs)
+        self.assertIn("required: false", inputs)
+        self.assertIn("default: 3", inputs)
+        self.assertIn("within_grace:", self.template)
+        self.assertIn("within_grace: ${{ steps.check.outputs.within_grace }}", self.template)
+
+    def test_grace_logic_is_shared_by_strict_expect_modes(self) -> None:
+        gate = step_script(self.template, "Contract freshness gate (fail closed)")
+        self.assertIn('if [ "$EXPECT" != "warn" ] && [ "$status" = "BEHIND" ] && [ "$rc" -ne 0 ]; then', gate)
+        self.assertIn('[ "$within" = true ]', gate)
+        self.assertIn('if [ "$decision_pass" = false ]; then', gate)
+        self.assertIn('within=false', gate)
+        self.assertIn('within_grace=$within', gate)
+        self.assertIn('merge-base", "--is-ancestor"', gate)
+        self.assertIn('rev-list", "--reverse", "--ancestry-path"', gate)
+        self.assertIn('cannot compute BEHIND grace', gate)
+        self.assertIn('refs/remotes/origin/{freshness_ref}', gate)
+        self.assertIn('refs/tags/{freshness_ref}', gate)
+        self.assertIn('isinstance(source, dict)', gate)
+        self.assertIn('upstream {used_ref}', gate)
+        self.assertIn(r'r"^\s+revision:\s*([0-9a-f]{7,40})\b"', gate)
+
+    def test_grace_expiry_executes_embedded_python_against_git_history(self) -> None:
+        gate = step_script(self.template, "Contract freshness gate (fail closed)")
+        block = re.search(r'grace_json=\$\(python3 - "\$MANIFEST" "\$CONTRACT_REPO" "\$GRACE_DAYS" <<\'PY\'\n(.*?)\nPY', gate, re.S)
+        self.assertIsNotNone(block)
+        script = textwrap.dedent(block.group(1))
+        self.assertIn('"within": age < grace', script)
+        self.assertIn('"--ancestry-path", f"{pin}..{head}"', script)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repo = root / "repo"
+            repo.mkdir()
+            git(repo, "init", "-q", "-b", "main")
+            old = int(time.time()) - 2 * 86400
+            (repo / "file").write_text("pin\n")
+            git(repo, "add", "file")
+            commit_env = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+                          "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t",
+                          "GIT_AUTHOR_DATE": f"@{old}", "GIT_COMMITTER_DATE": f"@{old}",
+                          "PATH": "/usr/bin:/bin", "HOME": str(repo)}
+            subprocess.run(["git", "commit", "-q", "-m", "pin"], cwd=repo,
+                           env=commit_env, capture_output=True, text=True, check=True)
+            pin = git(repo, "rev-parse", "HEAD")
+            (repo / "file").write_text("upstream\n")
+            git(repo, "add", "file")
+            later_env = {**commit_env, "GIT_AUTHOR_DATE": f"@{old + 60}",
+                         "GIT_COMMITTER_DATE": f"@{old + 60}"}
+            subprocess.run(["git", "commit", "-q", "-m", "upstream"], cwd=repo,
+                           env=later_env, capture_output=True, text=True, check=True)
+            head = git(repo, "rev-parse", "HEAD")
+            git(repo, "update-ref", "refs/remotes/origin/main", head)
+            manifest = root / "adoption.yaml"
+            manifest.write_text(f"source:\n  revision: {pin}\nfreshness:\n  ref: main\n")
+            result = root / "freshness.json"
+            result.write_text('{"status":"BEHIND","pin":"' + pin + '"}')
+            outcomes = {}
+            for days in ("0", "3", "1"):
+                env = {"PATH": "/usr/bin:/bin", "HOME": str(root), "JSON_OUT": str(result)}
+                run = subprocess.run([sys.executable, "-c", script, str(manifest), str(repo), days],
+                                     env=env, capture_output=True, text=True)
+                self.assertEqual(run.returncode, 0, run.stderr)
+                outcomes[days] = json.loads(run.stdout)["within"]
+            self.assertEqual(outcomes, {"0": False, "3": True, "1": False})
+
+    def test_grace_self_smoke_calls_real_template_and_asserts_outputs(self) -> None:
+        for job in ("contract-freshness-grace", "contract-freshness-no-grace"):
+            body = jobs_in(self.smoke)[job]
+            joined = "\n".join(body)
+            self.assertIn("uses: ./.github/workflows/reusable-contract-freshness.yml", joined)
+            self.assertIn('fixtures/contract-demo/stale-adoption.yaml', joined)
+        self.assertIn("grace-days: 36500", self.smoke)
+        self.assertIn("grace-days: 0", self.smoke)
+        self.assertIn("needs.contract-freshness-grace.outputs.within_grace", self.smoke)
+        self.assertIn("needs.contract-freshness-no-grace.outputs.within_grace", self.smoke)
+        self.assertIn('test "$PROBE_STATUS" = BEHIND', self.smoke)
+        no_grace = jobs_in(self.smoke)["contract-freshness-no-grace"]
+        self.assertIn('expect: "noncurrent"', "\n".join(no_grace))
+        self.assertIn("With a window that never expired", self.smoke)
+        proof = jobs_in(self.smoke)["contract-freshness-no-grace-proven"]
+        self.assertIn('test "$PROBE_RESULT" = success', "\n".join(proof))
 
 
 class PythonTemplateTest(unittest.TestCase):
