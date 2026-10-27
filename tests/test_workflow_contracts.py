@@ -108,6 +108,42 @@ class EveryJobIsBoundedTest(unittest.TestCase):
                     )
 
 
+class ContractFreshnessGraceTest(unittest.TestCase):
+    template = read("reusable-contract-freshness.yml")
+    smoke = (WF / "self-smoke.yml").read_text()
+
+    def test_grace_input_and_output_are_public_with_safe_defaults(self) -> None:
+        inputs = self.template.split("      grace-days:\n", 1)[1].split("    outputs:\n", 1)[0]
+        self.assertIn("type: number", inputs)
+        self.assertIn("required: false", inputs)
+        self.assertIn("default: 3", inputs)
+        self.assertIn("within-grace:", self.template)
+        self.assertIn("within-grace: ${{ steps.check.outputs.within-grace }}", self.template)
+
+    def test_grace_logic_is_nested_under_behind_current_only(self) -> None:
+        gate = step_script(self.template, "Contract freshness gate (fail closed)")
+        current = gate.split('  current)\n', 1)[1].split('  noncurrent)\n', 1)[0]
+        self.assertIn('if [ "$status" = "BEHIND" ]; then', current)
+        self.assertIn('if [ "$within" = true ]; then', current)
+        self.assertIn('exit "$rc"', current)
+        self.assertLess(current.index('if [ "$status" = "BEHIND" ]'), current.index('echo "::error::contract freshness gate failed'))
+        self.assertIn('within-grace=false', gate)
+        self.assertIn('within-grace=true', current)
+        self.assertIn('merge-base", "--is-ancestor"', current)
+        self.assertIn('rev-list", "--reverse", "--ancestry-path"', current)
+        self.assertIn('cannot compute BEHIND grace', current)
+
+    def test_grace_self_smoke_calls_real_template_and_asserts_outputs(self) -> None:
+        for job in ("contract-freshness-grace", "contract-freshness-no-grace"):
+            body = jobs_in(self.smoke)[job]
+            joined = "\n".join(body)
+            self.assertIn("uses: ./.github/workflows/reusable-contract-freshness.yml", joined)
+            self.assertIn('fixtures/contract-demo/stale-adoption.yaml', joined)
+        self.assertIn("grace-days: 36500", self.smoke)
+        self.assertIn("grace-days: 0", self.smoke)
+        self.assertIn("needs.contract-freshness-grace.outputs.within-grace", self.smoke)
+        self.assertIn("needs.contract-freshness-no-grace.outputs.within-grace", self.smoke)
+        self.assertIn('test "$PROBE_STATUS" = BEHIND', self.smoke)
 class PythonTemplateTest(unittest.TestCase):
     text = read("reusable-python.yml")
 

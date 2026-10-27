@@ -423,6 +423,68 @@ jobs:
       manifest-path: "fixtures/contract-demo/stale-adoption.yaml"
       expect: "noncurrent"
 
+  # The same permanently stale pin also proves the BEHIND-only grace path.
+  # A huge window makes the assertion independent of fixture age; outputs
+  # must still report the real BEHIND verdict and the explicit grace decision.
+  contract-freshness-grace:
+    name: contract freshness — BEHIND inside grace (must pass)
+    uses: ./.github/workflows/reusable-contract-freshness.yml
+    with:
+      manifest-path: "fixtures/contract-demo/stale-adoption.yaml"
+      grace-days: 36500
+
+  contract-freshness-grace-proven:
+    name: assert BEHIND grace output
+    needs: contract-freshness-grace
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Assert the grace decision and real verdict
+        env:
+          PROBE_RESULT: ${{ needs.contract-freshness-grace.result }}
+          PROBE_EXIT: ${{ needs.contract-freshness-grace.outputs.exit-code }}
+          PROBE_STATUS: ${{ needs.contract-freshness-grace.outputs.status }}
+          PROBE_GRACE: ${{ needs.contract-freshness-grace.outputs.within-grace }}
+        run: |
+          set -eu
+          test "$PROBE_RESULT" = success
+          test "$PROBE_EXIT" = 1
+          test "$PROBE_STATUS" = BEHIND
+          test "$PROBE_GRACE" = true
+          echo "OK: BEHIND passed only inside grace; real status and tool exit remain exposed"
+
+  # Zero grace preserves today's strict behavior and exercises the existing
+  # positive inversion pattern without removing the permanently stale probe.
+  contract-freshness-no-grace:
+    name: contract freshness — zero grace (green iff gate correctly red)
+    uses: ./.github/workflows/reusable-contract-freshness.yml
+    with:
+      manifest-path: "fixtures/contract-demo/stale-adoption.yaml"
+      grace-days: 0
+      expect: "current"
+
+  contract-freshness-no-grace-proven:
+    name: assert zero grace stayed red
+    needs: contract-freshness-no-grace
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Assert zero grace did not pass the BEHIND verdict
+        env:
+          PROBE_RESULT: ${{ needs.contract-freshness-no-grace.result }}
+          PROBE_EXIT: ${{ needs.contract-freshness-no-grace.outputs.exit-code }}
+          PROBE_STATUS: ${{ needs.contract-freshness-no-grace.outputs.status }}
+          PROBE_GRACE: ${{ needs.contract-freshness-no-grace.outputs.within-grace }}
+        run: |
+          set -eu
+          test "$PROBE_RESULT" = failure
+          test "$PROBE_EXIT" = 1
+          test "$PROBE_STATUS" = BEHIND
+          test "$PROBE_GRACE" = false
+          echo "OK: zero grace kept BEHIND red with the original exit code"
+
   # warn mode: the same stale pin passes, with a warning (PRs in repos
   # with a pin robot); its status output still says the real verdict.
   contract-freshness-warn:

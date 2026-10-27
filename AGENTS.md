@@ -63,7 +63,7 @@ caps at four sections and under 400 words.
 | `reusable-python.yml` | uv + `uv sync --frozen` + repo-given pytest args (junit-xml artifact, failing tests + short tracebacks in the job summary, `timeout-minutes` input default 30 on every job), optional repo gates after pytest, optional ruff/bandit jobs |
 | `reusable-node.yml` | setup-node + `npm ci` + optional build/lint/test + dist artifact upload; optional Python/uv bootstrap for polyglot e2e (Playwright on a uvicorn app) |
 | `reusable-container-smoke.yml` | docker build + detached run + configurable healthz curl retry loop, with container logs on failure |
-| `reusable-contract-freshness.yml` | shallow-clone the Play-Nice contract source over https, run `contractctl freshness --manifest <caller manifest> --json`; exit 0 only on CURRENT (fail closed) |
+| `reusable-contract-freshness.yml` | blobless full-history clone of Play-Nice over https, run `contractctl freshness --manifest <caller manifest> --json`; default 3-day grace delays only a BEHIND failure, based on the oldest unadopted upstream commit; all other verdicts fail closed |
 | `reusable-uat.yml` | pinned checkout + setup-node (npm cache, conditional `npm ci`) + a caller-supplied real-browser UAT command under a `UAT_READONLY=1` read-only posture with optional `uat-token` passthrough; UAT output uploaded as an artifact (14-day retention) |
 | `reusable-secret-scan.yml` | pinned checkout + the gitleaks CLI (pinned version and sha256; the action needs a paid key for org repos); a repo-local `.gitleaks.toml` allowlists documented false positives instead of suppressing at the harness level. on `pull_request` it scans only the commits the PR adds (`--log-opts base..head`, full fetch forced, fail closed if the range cannot be resolved); on any other event it scans what `fetch-depth` fetched (default 0 = full history) |
 | `reusable-claims-policy.yml` | fetch the canonical honest-claims policy from this repo **at the revision the caller pinned** (`github.workflow_ref`), install conftest, run a canary that proves the policy fires, then gate the PR body or commit message. `mirror-path` additionally proves a repo's vendored bash mirror agrees with the policy. Fail closed on an unreadable body |
@@ -183,11 +183,17 @@ whenever the manifest itself changes:
 ```
 
 Mechanics are fail-closed by construction: the job runs `contractctl freshness --json` from
-a fresh shallow clone of `rylee-bee-labs/play-nice-contracts` and propagates its exit
-code — 0 **only** when the verdict is CURRENT; BEHIND/DIVERGED exit 1;
-UNREACHABLE/UNKNOWN (missing or malformed manifest included) exit 2. The tool's JSON verdict
-is printed, and `exit-code` / `status` are exposed as job outputs so a caller can assert on
-the verdict without parsing logs. The default `expect: current` input means red on ANY
+a fresh blobless, full-history clone of `rylee-bee-labs/play-nice-contracts` and propagates its exit
+code — 0 **only** when the verdict is CURRENT, except that `expect: current` may delay a
+BEHIND failure for the default three days. The clock starts at the committer date of the
+oldest upstream commit after the caller's pin, not when the consumer first runs CI. During
+that window the job warns and records the real `BEHIND` status and `within-grace=true`; after
+it expires, BEHIND remains red with the tool's exit code. DIVERGED, UNREACHABLE, UNKNOWN,
+malformed or missing manifests, and any uncomputable age remain red immediately. Setting
+`grace-days: 0` restores strict BEHIND behavior. This delays a failure only: it never skips
+the contract check or permits adopting below the pinned Play-Nice floor. The tool's JSON verdict
+is printed, and `exit-code` / `status` / `within-grace` are exposed as job outputs so a caller can assert on
+the verdict without parsing logs. The default `expect: current` input means red on other
 drift; `expect: warn` (for pull requests in a repo whose pin moves by robot,
 `tools/pin-sync` in play-nice-contracts) passes with a visible warning and keeps the real
 verdict in `status`; `expect: noncurrent` is the harness's own self-smoke inversion (see

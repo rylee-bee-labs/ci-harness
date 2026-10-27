@@ -33,7 +33,9 @@ name: reusable-contract-freshness
 # (play-nice-contracts tools/pin-sync). `expect: warn` is for pull
 # requests in a repo that has such a robot: drift is reported as a
 # warning so unrelated PRs aren't blocked, while pushes to the default
-# branch and the schedule keep `current` and stay honestly red.
+# branch and the schedule keep `current` and stay honestly red after a
+# three-day grace for BEHIND only. The clock starts at the oldest upstream
+# commit after the pin; DIVERGED and uncomputable states remain red.
 
 on:
   workflow_call:
@@ -75,6 +77,13 @@ on:
         type: string
         required: false
         default: "current"
+      grace-days:
+        description: >-
+          For expect=current only, delay failure for a BEHIND pin until this many days
+          after the oldest unadopted upstream commit. Does not soften other verdicts.
+        type: number
+        required: false
+        default: 3
     outputs:
       exit-code:
         description: >-
@@ -85,6 +94,9 @@ on:
         description: >-
           Machine verdict: CURRENT | BEHIND | DIVERGED | UNREACHABLE | UNKNOWN.
         value: ${{ jobs.freshness.outputs.status }}
+      within-grace:
+        description: "true only when a BEHIND verdict passed inside the grace window"
+        value: ${{ jobs.freshness.outputs.within-grace }}
 
 permissions:
   contents: read
@@ -97,6 +109,7 @@ jobs:
     outputs:
       exit-code: ${{ steps.check.outputs.exit-code }}
       status: ${{ steps.check.outputs.status }}
+      within-grace: ${{ steps.check.outputs.within-grace }}
     steps:
       # Preflight: fail in one plain line, before any real work, when the runner's scratch or
       # workspace is not writable by this job's uid (self-hosted leftovers from a root-owned
@@ -179,6 +192,9 @@ jobs:
           CONTRACTCTL: ${{ runner.temp }}/play-nice-contracts/tools/contractctl/contractctl.py
           JSON_OUT: ${{ runner.temp }}/freshness.json
           EXPECT: ${{ inputs.expect }}
+          GRACE_DAYS: ${{ inputs.grace-days }}
+          CONTRACT_REPO: ${{ runner.temp }}/play-nice-contracts
+          STEP_SUMMARY: ${{ github.step_summary }}
         run: |
           set +e
           python3 "$CONTRACTCTL" freshness --manifest "$MANIFEST" --json > "$JSON_OUT"
@@ -188,9 +204,74 @@ jobs:
           detail=$(FRESHNESS_JSON="$JSON_OUT" python3 -c 'import json, os; print(json.load(open(os.environ["FRESHNESS_JSON"])).get("detail", "")[:300])' 2>/dev/null) || detail=""
           echo "exit-code=$rc" >> "$GITHUB_OUTPUT"
           echo "status=$status" >> "$GITHUB_OUTPUT"
+          echo "within-grace=false" >> "$GITHUB_OUTPUT"
           case "$EXPECT" in
             current)
               if [ "$rc" -ne 0 ]; then
+                if [ "$status" = "BEHIND" ]; then
+                  grace=$(python3 - "$MANIFEST" "$CONTRACT_REPO" "$GRACE_DAYS" <<'PY'
+          import datetime as dt
+          import json
+          import re
+          import subprocess
+          import sys
+
+          manifest, repo, grace_raw = sys.argv[1:]
+          try:
+              grace = float(grace_raw)
+              if grace < 0 or not grace < float("inf"):
+                  raise ValueError("invalid grace-days")
+              lines = open(manifest, encoding="utf-8").read().splitlines()
+              in_source = False
+              pin = None
+              for line in lines:
+                  if re.fullmatch(r"source:\s*", line):
+                      in_source = True
+                      continue
+                  if in_source and line and not line[0].isspace():
+                      break
+                  match = re.fullmatch(r"\s{2}revision:\s*([0-9a-f]{40})\s*(?:#.*)?", line)
+                  if in_source and match:
+                      pin = match.group(1)
+                      break
+              if pin is None:
+                  raise ValueError("missing or malformed source.revision")
+              def git(*args):
+                  return subprocess.run(["git", "-C", repo, *args], check=True,
+                                        capture_output=True, text=True).stdout.strip()
+              pin = git("rev-parse", "--verify", f"{pin}^{{commit}}")
+              head = git("rev-parse", "--verify", "refs/remotes/origin/main^{commit}")
+              if subprocess.run(["git", "-C", repo, "merge-base", "--is-ancestor", pin, head]).returncode != 0:
+                  raise ValueError("pin is not an ancestor of upstream main")
+              commits = git("rev-list", "--reverse", "--ancestry-path", f"{pin}..{head}").splitlines()
+              if not commits:
+                  raise ValueError("BEHIND has no unadopted commits")
+              oldest = commits[0]
+              stamp = int(git("show", "-s", "--format=%ct", oldest))
+              age = (dt.datetime.now(dt.timezone.utc).timestamp() - stamp) / 86400
+              if age < 0:
+                  raise ValueError("oldest upstream commit has a future timestamp")
+              expires = dt.datetime.fromtimestamp(stamp + grace * 86400, dt.timezone.utc)
+              print(json.dumps({"within": age < grace, "pin": pin, "head": head,
+                                "grace": grace, "expires": expires.isoformat(), "age": age}))
+          except Exception as exc:
+              print(f"cannot compute BEHIND grace: {exc}", file=sys.stderr)
+              sys.exit(1)
+          PY
+                  ) || {
+                    echo "::error::contract freshness grace could not be computed; failing closed"
+                    exit "$rc"
+                  }
+                  within=$(GRACE_JSON="$grace" python3 -c 'import json,os; print(str(json.loads(os.environ["GRACE_JSON"])["within"]).lower())')
+                  if [ "$within" = true ]; then
+                    echo "within-grace=true" >> "$GITHUB_OUTPUT"
+                    message=$(GRACE_JSON="$grace" python3 -c 'import json,os; d=json.loads(os.environ["GRACE_JSON"]); print("BEHIND pin %s…; upstream main %s…; grace %s days expires %s (oldest unadopted commit age %.2f days)" % (d["pin"][:12], d["head"][:12], d["grace"], d["expires"], d["age"]))')
+                    echo "::warning::contract freshness: $message"
+                    echo "### Contract freshness grace" >> "$STEP_SUMMARY"
+                    echo "$message" >> "$STEP_SUMMARY"
+                    exit 0
+                  fi
+                fi
                 echo "::error::contract freshness gate failed: status=$status (exit $rc) — ${detail:-no verdict detail; check the JSON above} — read what changed upstream, then re-pin source.revision in the manifest manually (a human decision; this check detects drift and never moves pins)"
                 exit "$rc"
               fi
