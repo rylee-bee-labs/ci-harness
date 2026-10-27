@@ -194,7 +194,6 @@ jobs:
           EXPECT: ${{ inputs.expect }}
           GRACE_DAYS: ${{ inputs.grace-days }}
           CONTRACT_REPO: ${{ runner.temp }}/play-nice-contracts
-          STEP_SUMMARY: ${{ github.step_summary }}
         run: |
           set +e
           python3 "$CONTRACTCTL" freshness --manifest "$MANIFEST" --json > "$JSON_OUT"
@@ -267,8 +266,8 @@ jobs:
                     echo "within-grace=true" >> "$GITHUB_OUTPUT"
                     message=$(GRACE_JSON="$grace" python3 -c 'import json,os; d=json.loads(os.environ["GRACE_JSON"]); print("BEHIND pin %s…; upstream main %s…; grace %s days expires %s (oldest unadopted commit age %.2f days)" % (d["pin"][:12], d["head"][:12], d["grace"], d["expires"], d["age"]))')
                     echo "::warning::contract freshness: $message"
-                    echo "### Contract freshness grace" >> "$STEP_SUMMARY"
-                    echo "$message" >> "$STEP_SUMMARY"
+                    echo "### Contract freshness grace" >> "$GITHUB_STEP_SUMMARY"
+                    echo "$message" >> "$GITHUB_STEP_SUMMARY"
                     exit 0
                   fi
                 fi
