@@ -64,7 +64,8 @@ on:
       expect:
         description: >-
           Required verdict. DEFAULT "current" = consumer semantics: red on
-          ANY drift (BEHIND/DIVERGED/UNREACHABLE/UNKNOWN all fail). The
+          DIVERGED / UNREACHABLE / UNKNOWN fail immediately; BEHIND fails
+          after `grace-days`. The
           harness's self-smoke passes "noncurrent" against a permanently
           stale fixture: the job goes GREEN exactly when the gate correctly
           refuses the drifted pin — GitHub forbids continue-on-error on
@@ -94,9 +95,9 @@ on:
         description: >-
           Machine verdict: CURRENT | BEHIND | DIVERGED | UNREACHABLE | UNKNOWN.
         value: ${{ jobs.freshness.outputs.status }}
-      within-grace:
+      within_grace:
         description: "true only when a BEHIND verdict passed inside the grace window"
-        value: ${{ jobs.freshness.outputs.within-grace }}
+        value: ${{ jobs.freshness.outputs.within_grace }}
 
 permissions:
   contents: read
@@ -109,7 +110,7 @@ jobs:
     outputs:
       exit-code: ${{ steps.check.outputs.exit-code }}
       status: ${{ steps.check.outputs.status }}
-      within-grace: ${{ steps.check.outputs.within-grace }}
+      within_grace: ${{ steps.check.outputs.within_grace }}
     steps:
       # Preflight: fail in one plain line, before any real work, when the runner's scratch or
       # workspace is not writable by this job's uid (self-hosted leftovers from a root-owned
@@ -203,7 +204,7 @@ jobs:
           detail=$(FRESHNESS_JSON="$JSON_OUT" python3 -c 'import json, os; print(json.load(open(os.environ["FRESHNESS_JSON"])).get("detail", "")[:300])' 2>/dev/null) || detail=""
           echo "exit-code=$rc" >> "$GITHUB_OUTPUT"
           echo "status=$status" >> "$GITHUB_OUTPUT"
-          echo "within-grace=false" >> "$GITHUB_OUTPUT"
+          echo "within_grace=false" >> "$GITHUB_OUTPUT"
           case "$EXPECT" in
             current)
               if [ "$rc" -ne 0 ]; then
@@ -211,6 +212,7 @@ jobs:
                   grace=$(python3 - "$MANIFEST" "$CONTRACT_REPO" "$GRACE_DAYS" <<'PY'
           import datetime as dt
           import json
+          import os
           import re
           import subprocess
           import sys
@@ -221,25 +223,38 @@ jobs:
               if grace < 0 or not grace < float("inf"):
                   raise ValueError("invalid grace-days")
               lines = open(manifest, encoding="utf-8").read().splitlines()
-              in_source = False
+              data = json.load(open(os.environ["JSON_OUT"], encoding="utf-8"))
+              freshness_ref = "main"
               pin = None
+              in_source = False
+              in_freshness = False
               for line in lines:
                   if re.fullmatch(r"source:\s*", line):
                       in_source = True
                       continue
                   if in_source and line and not line[0].isspace():
-                      break
-                  match = re.fullmatch(r"\s{2}revision:\s*([0-9a-f]{40})\s*(?:#.*)?", line)
+                      in_source = False
+                  if re.fullmatch(r"freshness:\s*", line):
+                      in_source = False
+                      in_freshness = True
+                      continue
+                  if in_freshness and line and not line[0].isspace():
+                      in_freshness = False
+                  match = re.match(r"^\s+revision:\s*([0-9a-f]{7,40})\b", line)
                   if in_source and match:
                       pin = match.group(1)
-                      break
+                  ref_match = re.match(r"^\s+ref:\s*([A-Za-z0-9._/-]+)\s*(?:#.*)?$", line)
+                  if in_freshness and ref_match:
+                      freshness_ref = ref_match.group(1)
+              reported_pin = data.get("pin") or data.get("source_revision") or data.get("source", {}).get("revision") or data.get("revision")
+              pin = reported_pin or pin
               if pin is None:
                   raise ValueError("missing or malformed source.revision")
               def git(*args):
                   return subprocess.run(["git", "-C", repo, *args], check=True,
                                         capture_output=True, text=True).stdout.strip()
               pin = git("rev-parse", "--verify", f"{pin}^{{commit}}")
-              head = git("rev-parse", "--verify", "refs/remotes/origin/main^{commit}")
+              head = git("rev-parse", "--verify", f"refs/remotes/origin/{freshness_ref}^{{commit}}")
               if subprocess.run(["git", "-C", repo, "merge-base", "--is-ancestor", pin, head]).returncode != 0:
                   raise ValueError("pin is not an ancestor of upstream main")
               commits = git("rev-list", "--reverse", "--ancestry-path", f"{pin}..{head}").splitlines()
@@ -251,7 +266,8 @@ jobs:
               if age < 0:
                   raise ValueError("oldest upstream commit has a future timestamp")
               expires = dt.datetime.fromtimestamp(stamp + grace * 86400, dt.timezone.utc)
-              print(json.dumps({"within": age < grace, "pin": pin, "head": head,
+              print(json.dumps({"within": age < grace, "age": age, "pin": pin, "head": head,
+                                "ref": freshness_ref,
                                 "grace": grace, "expires": expires.isoformat(), "age": age}))
           except Exception as exc:
               print(f"cannot compute BEHIND grace: {exc}", file=sys.stderr)
@@ -263,8 +279,8 @@ jobs:
                   }
                   within=$(GRACE_JSON="$grace" python3 -c 'import json,os; print(str(json.loads(os.environ["GRACE_JSON"])["within"]).lower())')
                   if [ "$within" = true ]; then
-                    echo "within-grace=true" >> "$GITHUB_OUTPUT"
-                    message=$(GRACE_JSON="$grace" python3 -c 'import json,os; d=json.loads(os.environ["GRACE_JSON"]); print("BEHIND pin %s…; upstream main %s…; grace %s days expires %s (oldest unadopted commit age %.2f days)" % (d["pin"][:12], d["head"][:12], d["grace"], d["expires"], d["age"]))')
+                    echo "within_grace=true" >> "$GITHUB_OUTPUT"
+                    message=$(GRACE_JSON="$grace" python3 -c 'import json,os; d=json.loads(os.environ["GRACE_JSON"]); print("BEHIND pin %s…; upstream %s %s…; grace %s days expires %s (oldest unadopted commit age %.2f days)" % (d["pin"][:12], d["ref"], d["head"][:12], d["grace"], d["expires"], d["age"]))')
                     echo "::warning::contract freshness: $message"
                     echo "### Contract freshness grace" >> "$GITHUB_STEP_SUMMARY"
                     echo "$message" >> "$GITHUB_STEP_SUMMARY"

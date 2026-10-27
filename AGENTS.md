@@ -187,12 +187,12 @@ a fresh blobless, full-history clone of `rylee-bee-labs/play-nice-contracts` and
 code — 0 **only** when the verdict is CURRENT, except that `expect: current` may delay a
 BEHIND failure for the default three days. The clock starts at the committer date of the
 oldest upstream commit after the caller's pin, not when the consumer first runs CI. During
-that window the job warns and records the real `BEHIND` status and `within-grace=true`; after
+that window the job warns and records the real `BEHIND` status and `within_grace=true`; after
 it expires, BEHIND remains red with the tool's exit code. DIVERGED, UNREACHABLE, UNKNOWN,
 malformed or missing manifests, and any uncomputable age remain red immediately. Setting
 `grace-days: 0` restores strict BEHIND behavior. This delays a failure only: it never skips
 the contract check or permits adopting below the pinned Play-Nice floor. The tool's JSON verdict
-is printed, and `exit-code` / `status` / `within-grace` are exposed as job outputs so a caller can assert on
+is printed, and `exit-code` / `status` / `within_grace` are exposed as job outputs so a caller can assert on
 the verdict without parsing logs. The default `expect: current` input means red on other
 drift; `expect: warn` (for pull requests in a repo whose pin moves by robot,
 `tools/pin-sync` in play-nice-contracts) passes with a visible warning and keeps the real
@@ -208,7 +208,10 @@ self-smoke proves both verdicts as POSITIVE assertions on every run: the committ
 current-pin fixture must pass through the real `uses:` call; a permanently stale fixture must
 exit nonzero — proven by an inversion job (`expect: noncurrent`, green exactly when the gate
 correctly goes red, because GitHub forbids `continue-on-error` on `uses:` jobs) plus an
-assertion job on the probe's propagated outputs; and a manifest generated live from
+assertion job on the probe's propagated outputs. The grace proofs cover both sides: one
+stale pin passes inside a deliberately huge window, while another is green only because the
+gate stayed red with `grace-days: 0`; both assert the propagated `within_grace` output. A
+manifest generated live from
 `git ls-remote` at run time must read CURRENT, so the green-path witness never rots when the
 library moves. The committed current-pin fixture declares `update: automatic`, so a
 docs-only upstream move leaves it CURRENT (the tool's equivalence rule, provable because the

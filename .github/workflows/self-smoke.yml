@@ -445,7 +445,7 @@ jobs:
           PROBE_RESULT: ${{ needs.contract-freshness-grace.result }}
           PROBE_EXIT: ${{ needs.contract-freshness-grace.outputs.exit-code }}
           PROBE_STATUS: ${{ needs.contract-freshness-grace.outputs.status }}
-          PROBE_GRACE: ${{ needs.contract-freshness-grace.outputs.within-grace }}
+          PROBE_GRACE: ${{ needs.contract-freshness-grace.outputs.within_grace }}
         run: |
           set -eu
           test "$PROBE_RESULT" = success
@@ -462,7 +462,7 @@ jobs:
     with:
       manifest-path: "fixtures/contract-demo/stale-adoption.yaml"
       grace-days: 0
-      expect: "current"
+      expect: "noncurrent"
 
   contract-freshness-no-grace-proven:
     name: assert zero grace stayed red
@@ -476,14 +476,14 @@ jobs:
           PROBE_RESULT: ${{ needs.contract-freshness-no-grace.result }}
           PROBE_EXIT: ${{ needs.contract-freshness-no-grace.outputs.exit-code }}
           PROBE_STATUS: ${{ needs.contract-freshness-no-grace.outputs.status }}
-          PROBE_GRACE: ${{ needs.contract-freshness-no-grace.outputs.within-grace }}
+          PROBE_GRACE: ${{ needs.contract-freshness-no-grace.outputs.within_grace }}
         run: |
           set -eu
-          test "$PROBE_RESULT" = failure
+          test "$PROBE_RESULT" = success
           test "$PROBE_EXIT" = 1
           test "$PROBE_STATUS" = BEHIND
           test "$PROBE_GRACE" = false
-          echo "OK: zero grace kept BEHIND red with the original exit code"
+          echo "OK: zero grace inversion passed because BEHIND stayed red"
 
   # warn mode: the same stale pin passes, with a warning (PRs in repos
   # with a pin robot); its status output still says the real verdict.

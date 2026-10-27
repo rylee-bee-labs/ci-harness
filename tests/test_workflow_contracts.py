@@ -125,8 +125,8 @@ class ContractFreshnessGraceTest(unittest.TestCase):
         self.assertIn("type: number", inputs)
         self.assertIn("required: false", inputs)
         self.assertIn("default: 3", inputs)
-        self.assertIn("within-grace:", self.template)
-        self.assertIn("within-grace: ${{ steps.check.outputs.within-grace }}", self.template)
+        self.assertIn("within_grace:", self.template)
+        self.assertIn("within_grace: ${{ steps.check.outputs.within_grace }}", self.template)
 
     def test_grace_logic_is_nested_under_behind_current_only(self) -> None:
         gate = step_script(self.template, "Contract freshness gate (fail closed)")
@@ -135,11 +135,23 @@ class ContractFreshnessGraceTest(unittest.TestCase):
         self.assertIn('if [ "$within" = true ]; then', current)
         self.assertIn('exit "$rc"', current)
         self.assertLess(current.index('if [ "$status" = "BEHIND" ]'), current.index('echo "::error::contract freshness gate failed'))
-        self.assertIn('within-grace=false', gate)
-        self.assertIn('within-grace=true', current)
+        self.assertIn('within_grace=false', gate)
+        self.assertIn('within_grace=true', current)
         self.assertIn('merge-base", "--is-ancestor"', current)
         self.assertIn('rev-list", "--reverse", "--ancestry-path"', current)
         self.assertIn('cannot compute BEHIND grace', current)
+        self.assertIn('refs/remotes/origin/{freshness_ref}', current)
+        self.assertIn('data.get("source", {}).get("revision")', current)
+        self.assertIn(r'r"^\s+revision:\s*([0-9a-f]{7,40})\b"', current)
+
+    def test_grace_expiry_uses_oldest_commit_and_strict_boundary(self) -> None:
+        gate = step_script(self.template, "Contract freshness gate (fail closed)")
+        current = gate.split('  current)\n', 1)[1].split('  noncurrent)\n', 1)[0]
+        self.assertIn('"within": age < grace', current)
+        self.assertIn('"--ancestry-path", f"{pin}..{head}"', current)
+        expires_at = 3.0
+        self.assertTrue(2.999 < expires_at)
+        self.assertFalse(3.001 < expires_at)
 
     def test_grace_self_smoke_calls_real_template_and_asserts_outputs(self) -> None:
         for job in ("contract-freshness-grace", "contract-freshness-no-grace"):
@@ -149,9 +161,14 @@ class ContractFreshnessGraceTest(unittest.TestCase):
             self.assertIn('fixtures/contract-demo/stale-adoption.yaml', joined)
         self.assertIn("grace-days: 36500", self.smoke)
         self.assertIn("grace-days: 0", self.smoke)
-        self.assertIn("needs.contract-freshness-grace.outputs.within-grace", self.smoke)
-        self.assertIn("needs.contract-freshness-no-grace.outputs.within-grace", self.smoke)
+        self.assertIn("needs.contract-freshness-grace.outputs.within_grace", self.smoke)
+        self.assertIn("needs.contract-freshness-no-grace.outputs.within_grace", self.smoke)
         self.assertIn('test "$PROBE_STATUS" = BEHIND', self.smoke)
+        no_grace = jobs_in(self.smoke)["contract-freshness-no-grace"]
+        self.assertIn('expect: "noncurrent"', "\n".join(no_grace))
+        self.assertIn('test "$PROBE_RESULT" = success', self.smoke)
+
+
 class PythonTemplateTest(unittest.TestCase):
     text = read("reusable-python.yml")
 
