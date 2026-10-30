@@ -188,11 +188,31 @@ soft_claim {
 # Accepted command forms are "Verify by running:" and a line beginning
 # with "$ ". Angle-bracket placeholders, headings, comments, fences,
 # blank lines, and another command do not count as observed output.
+#
+# Continued commands (ci-harness#61). A command line that ends in a backslash
+# continues onto the next physical line, whatever that line holds (indented,
+# empty, even placeholder-looking), and so on while each line ends in a
+# backslash. The observed output is the first line AFTER the command:
+#
+#     $ pytest \
+#         --timeout=30 tests/        <- still the command
+#     30 passed in 4.10s             <- the observed output
+#
+# The output line must start flush left with something other than a
+# placeholder: an indented line is a continuation or noise, never the
+# observed output. scripts/verify-claim.sh implements the same rule line by
+# line; tests/test_claim_policy_drift.py holds the shared fixtures.
+#
+# The tail below is written out in full three times, like every pattern in
+# this file. Read it as: the command's first line, then EITHER a line ending
+# in a backslash followed by any number of further backslash lines and one
+# final line that does not end in one, OR a first line that does not end in a
+# backslash; then a newline and the output line.
 # ---------------------------------------------------------------------------
 
-dollar_evidence_re := "(?m)^\\$[ \\t]+[^<#$` \\t\\r\\n][^\\r\\n]*\\r?\\n[^<#$` \\t\\r\\n][^\\r\\n]*"
-inline_evidence_re := "(?m)^Verify by running:[ \\t]+[^<#$` \\t\\r\\n][^\\r\\n]*\\r?\\n[^<#$` \\t\\r\\n][^\\r\\n]*"
-block_evidence_re := "(?m)^Verify by running:[ \\t]*\\r?\\n[^<#$` \\t\\r\\n][^\\r\\n]*\\r?\\n[^<#$` \\t\\r\\n][^\\r\\n]*"
+dollar_evidence_re := "(?m)^\\$[ \\t]+(?:(?:\\\\|[^<#$` \\t\\r\\n][^\\r\\n]*\\\\)\\r?\\n(?:[^\\r\\n]*\\\\\\r?\\n)*(?:[^\\r\\n]*[^\\\\\\r\\n])?|(?:[^<#$` \\t\\r\\n\\\\]|[^<#$` \\t\\r\\n][^\\r\\n]*[^\\\\\\r\\n]))\\r?\\n[^<#$` \\t\\r\\n][^\\r\\n]*"
+inline_evidence_re := "(?m)^Verify by running:[ \\t]+(?:(?:\\\\|[^<#$` \\t\\r\\n][^\\r\\n]*\\\\)\\r?\\n(?:[^\\r\\n]*\\\\\\r?\\n)*(?:[^\\r\\n]*[^\\\\\\r\\n])?|(?:[^<#$` \\t\\r\\n\\\\]|[^<#$` \\t\\r\\n][^\\r\\n]*[^\\\\\\r\\n]))\\r?\\n[^<#$` \\t\\r\\n][^\\r\\n]*"
+block_evidence_re := "(?m)^Verify by running:[ \\t]*\\r?\\n(?:(?:\\\\|[^<#$` \\t\\r\\n][^\\r\\n]*\\\\)\\r?\\n(?:[^\\r\\n]*\\\\\\r?\\n)*(?:[^\\r\\n]*[^\\\\\\r\\n])?|(?:[^<#$` \\t\\r\\n\\\\]|[^<#$` \\t\\r\\n][^\\r\\n]*[^\\\\\\r\\n]))\\r?\\n[^<#$` \\t\\r\\n][^\\r\\n]*"
 
 has_evidence {
     regex.match(dollar_evidence_re, text)

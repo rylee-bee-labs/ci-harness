@@ -27,7 +27,7 @@ Estate rules: `~/.agents/AGENTS.md` and `play-nice-contracts/contracts/everyone/
 | `.github/workflows/secret-scan-selfcheck.yml` | source | runs `reusable-secret-scan.yml` on this repo: PR commits only on `pull_request`, full history on push to main and weekly | rarely |
 | `pins/ACTIONS.md` | docs/contract | every pinned action SHA, binary sha256, toolchain default, and the bump protocol | yes, before touching any `uses:` SHA or version default |
 | `README.md` | docs | the human-first front door: what it is, "Is it running?" (one state line + `gh run list -R rylee-bee-labs/ci-harness`), "How to use it", "Where to read more". Hard cap: under 400 words | rarely; it points at this file, not the reverse |
-| `policy/claims.rego`, `policy/claims_test.rego`, `scripts/verify-claim.sh`, `tests/test_claim_policy_drift.py` | source | **canonical** honest-claims policy: the conftest policy, its bash mirror for commit-time hooks, and the drift test that proves the two agree. `reusable-claims-policy.yml` serves these to consumers at their pinned revision; homelab predates the template and keeps its own copies, checked by the same drift test |
+| `policy/claims.rego`, `policy/claims_test.rego`, `scripts/verify-claim.sh`, `tests/test_claim_policy_drift.py`, `docs/guides/honest-claims.md` | source | **canonical** honest-claims policy: the conftest policy, its bash mirror for commit-time hooks, and the drift test that proves the two agree on shared fixtures (indented and backslash-continued commands included), plus the author's guide. `reusable-claims-policy.yml` serves these to consumers at their pinned revision; homelab predates the template and keeps its own copies, checked by the same drift test |
 | `fixtures/*-demo/` | fixtures | minimal projects self-smoke drives (py, node, container, uat, contract) | when the matching template changes |
 | `fixtures/contract-demo/current-adoption.yaml` | fixture | CURRENT pin; moved by the Play-Nice pin robot (`chore(play-nice): pin …` PRs) | don't hand-edit |
 | `fixtures/contract-demo/stale-adoption.yaml` | fixture | permanently stale pin; MUST stay red | never "fix" it |
@@ -66,7 +66,7 @@ caps at four sections and under 400 words.
 | `reusable-contract-freshness.yml` | blobless full-history clone of Play-Nice over https, run `contractctl freshness --manifest <caller manifest> --json`; default 3-day grace delays only a BEHIND failure, based on the oldest unadopted upstream commit; all other verdicts fail closed |
 | `reusable-uat.yml` | pinned checkout + setup-node (npm cache, conditional `npm ci`) + a caller-supplied real-browser UAT command under a `UAT_READONLY=1` read-only posture with optional `uat-token` passthrough; UAT output uploaded as an artifact (14-day retention) |
 | `reusable-secret-scan.yml` | pinned checkout + the gitleaks CLI (pinned version and sha256; the action needs a paid key for org repos); a repo-local `.gitleaks.toml` allowlists documented false positives instead of suppressing at the harness level. on `pull_request` it scans only the commits the PR adds (`--log-opts base..head`, full fetch forced, fail closed if the range cannot be resolved); on any other event it scans what `fetch-depth` fetched (default 0 = full history) |
-| `reusable-claims-policy.yml` | fetch the canonical honest-claims policy from this repo **at the revision the caller pinned** (`github.workflow_ref`), install conftest, run a canary that proves the policy fires, then gate the PR body or commit message. `mirror-path` additionally proves a repo's vendored bash mirror agrees with the policy. Fail closed on an unreadable body |
+| `reusable-claims-policy.yml` | fetch the canonical honest-claims policy from this repo **at the revision the caller pinned** (the `policy-revision` input, which must be a SHA the caller's own workflow jobs pin at `uses:`, read by parsing the YAML and judged per call: checked before the fetch, ci-harness#51), install conftest, run a canary that proves the policy fires, then gate the PR body or commit message. The PR body is read from the API at run time, so an edit plus "re-run failed jobs" re-judges it (ci-harness#61); a job whose token cannot read it falls back to the event payload with a `::warning::` naming the caller-side `pull-requests: read` grant (the template declares no `permissions:`, so the caller's grant flows down). `mirror-path` additionally proves a repo's vendored bash mirror agrees with the policy. Fail closed on an unreadable body |
 | `reusable-project-home.yml` | narrow Project Home CI reporter: exact task claim/heartbeat/finish plus deduplicated BOOP notice; callers pass the private base URL and a dedicated `ci`-scope token only as secrets |
 
 ### Secret scan scope (decided 2026-10-15)
@@ -115,8 +115,11 @@ workflow, never elevated (GitHub validates this before the run starts). So the t
 take their grants from the caller: `reusable-node` and `reusable-uat` declare no top-level
 `permissions:` at all because they upload artifacts — jobs that enable `upload-dist` (node)
 or `upload-artifacts: true` (uat) must grant `actions: write` at the calling job (or
-workflow) level; with those upload inputs false, plain `contents: read` is enough. The
-python and container templates declare only `contents: read`.
+workflow) level; with those upload inputs false, plain `contents: read` is enough.
+`reusable-claims-policy` declares none either, so a caller can grant `pull-requests: read` on
+its claims job and have the template re-read the current PR body (a cap here would drop that
+grant); `contents: read` is all it needs otherwise. The python and container templates declare
+only `contents: read`.
 
 ## Visibility requirement
 
@@ -330,9 +333,9 @@ collision. This repo is *CI* machinery only.
 - Template inputs/outputs/secrets are a public interface: add inputs with safe defaults;
   renaming or removing one is breaking — record the consumer companion edits, don't make
   them (sibling repos need explicit authorization).
-- Permissions flow caller → template and can only be downgraded. `reusable-node` and
-  `reusable-uat` declare no top-level `permissions:`; see "Permissions" above before
-  adding any grant.
+- Permissions flow caller → template and can only be downgraded. `reusable-node`,
+  `reusable-uat` and `reusable-claims-policy` declare no top-level `permissions:`; see
+  "Permissions" above before adding any grant.
 - Contract freshness clones `play-nice-contracts` at tip, **deliberately unpinned**; the
   verdict comes from `contractctl` there. There is no sync job here and never will be.
 - Name collision: Play-Nice `harness/` is an unrelated research ledger.

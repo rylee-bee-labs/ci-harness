@@ -93,6 +93,32 @@ CORPUS = [
 ]
 
 
+# ci-harness#61: the two halves disagreed on indentation and on commands
+# continued with a trailing backslash. The rules both sides now implement:
+#   * a command line that ends in `\` continues onto the next physical line,
+#     whatever that line holds (indented, empty, even a placeholder-looking one);
+#   * the observed output is the first line after the command, and it must start
+#     flush left with something other than a placeholder (`<`, `#`, `$`, backtick);
+#   * an indented line is a continuation or noise, never the observed output.
+# Each case is named so `-k continued` / `-k indented` selects the family.
+PARITY_CASES = [
+    ("continued_indented_command_then_output", "30 tests pass\n$ pytest \\\n    tests/\n30 passed", "pass"),
+    ("continued_flush_left_command_then_output", "30 tests pass\n$ pytest \\\n-q\n30 passed", "pass"),
+    ("continued_three_lines_then_output", "30 tests pass\n$ pytest \\\n  -q \\\n  tests/\n30 passed", "pass"),
+    ("continued_command_without_output", "30 tests pass\n$ pytest \\\n    tests/", "deny"),
+    ("continued_command_swallows_the_would_be_output", "30 tests pass\n$ pytest \\\n30 passed", "deny"),
+    ("continued_command_then_placeholder_output", "30 tests pass\n$ pytest \\\n    tests/\n<output>", "deny"),
+    ("continued_crlf_command_then_output", "30 tests pass\r\n$ pytest \\\r\n    tests/\r\n30 passed", "pass"),
+    ("continued_verify_inline_then_output", "30 tests pass\nVerify by running: pytest \\\n    tests/\n30 passed", "pass"),
+    ("continued_verify_block_then_output", "30 tests pass\nVerify by running:\npytest \\\n  tests/\n30 passed", "pass"),
+    ("indented_output_is_not_output", "30 tests pass\n$ pytest\n    30 passed", "deny"),
+    ("indented_output_tab_is_not_output", "30 tests pass\n$ pytest\n\t30 passed", "deny"),
+    ("indented_verify_inline_output_is_not_output", "30 tests pass\nVerify by running: pytest\n   30 passed", "deny"),
+    ("indented_verify_block_command_is_not_a_command", "30 tests pass\nVerify by running:\n  pytest\n30 passed", "deny"),
+    ("indented_second_command_then_output", "30 tests pass\n$ pytest\n$ ruff check\nAll good", "pass"),
+]
+
+
 def _bash_verdict(text):
     """Classify what the commit-time hook would do."""
     if not text:
@@ -151,6 +177,29 @@ def _rego_verdict(text, tmp_path):
 @needs_conftest
 @pytest.mark.parametrize(("text", "expected"), CORPUS, ids=lambda v: v[:38])
 def test_bash_and_rego_agree(text, expected, tmp_path):
+    bash = _bash_verdict(text)
+    rego = _rego_verdict(text, tmp_path)
+
+    assert bash == rego, (
+        "verify-claim.sh and claims.rego disagree on the same input.\n"
+        f"  input : {text!r}\n"
+        f"  bash  : {bash}\n"
+        f"  rego  : {rego}\n"
+        "Update both policy/claims.rego and scripts/verify-claim.sh together."
+    )
+    assert bash == expected, (
+        f"both sides agree on {bash!r}, which is not the intended verdict "
+        f"{expected!r} for {text!r}"
+    )
+
+
+@needs_conftest
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [pytest.param(text, expected, id=name) for name, text, expected in PARITY_CASES],
+)
+def test_bash_and_rego_agree_on_continued_and_indented_evidence(text, expected, tmp_path):
+    """ci-harness#61: one fixture, two implementations, one verdict."""
     bash = _bash_verdict(text)
     rego = _rego_verdict(text, tmp_path)
 
