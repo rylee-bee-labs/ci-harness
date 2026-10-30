@@ -17,7 +17,7 @@ schema: play-nice/adoption-v1
 project: ci-harness-fixture-current
 source:
   repository: rylee-bee-labs/play-nice-contracts
-  revision: a9c41978fd1ad78b098a44f50e924dd2848b63e1   # re-pinned 2026-10-26 by this mission because the pin robot was broken; contracts tip with current contracts/ and schema/.
+  revision: 2c5a6e40ad461f31b3a43ff61df553aa20fd29da   # re-pinned 2026-10-30 by Claude after reading a9c4197..2c5a6e4 (Play-Nice 2.2.0): the only contracts/ change is a new README.md in seven contract folders, schema/ is unchanged; the fixture only exercises the freshness gate.
 freshness:
   policy: require-current
   ref: main
