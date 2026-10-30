@@ -35,7 +35,9 @@ name: reusable-claims-policy
 # The PR body is read from the API at run time, not from the event payload
 # (ci-harness#61): a payload is frozen when the event fires, so an edited body
 # and a re-run of a failed job both judged the OLD text. A caller that does not
-# grant the read keeps the payload, with a warning that says how to fix it.
+# grant the read keeps the payload, with a warning that says how to fix it. The grant is
+# the caller's (`pull-requests: read` on the calling job): this template declares no
+# `permissions:` of its own, so whatever the caller grants flows down.
 #
 # Canary before use: conftest reports a POLICY THAT FAILS TO COMPILE with exit
 # 1, which is indistinguishable from a policy denial. If claims.rego is broken,
@@ -85,8 +87,11 @@ on:
         required: false
         default: auto
 
-permissions:
-  contents: read
+# No top-level `permissions:` key on purpose, the same as reusable-node and reusable-uat:
+# a called workflow may only keep or downgrade the caller's GITHUB_TOKEN permissions, so a
+# `contents: read` cap here would also cap the optional `pull-requests: read` a caller
+# grants for the current-body read (ci-harness#61). The caller decides; see AGENTS.md
+# "Permissions". Nothing in this job needs more than `contents: read`.
 
 jobs:
   claims:
@@ -201,34 +206,76 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          rev="$POLICY_REVISION"
-          shopt -s nullglob
-          files=("$GITHUB_WORKSPACE"/.github/workflows/*.yml "$GITHUB_WORKSPACE"/.github/workflows/*.yaml)
-          pins=""
-          if [[ ${#files[@]} -gt 0 ]]; then
-            # Only live `uses:` lines (a comment that quotes an old SHA is not a pin), quoted or not.
-            pins="$(grep -hE "^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]*[\"']?rylee-bee-labs/ci-harness/\\.github/workflows/reusable-claims-policy\\.ya?ml@" "${files[@]}" \
-              | sed -E "s/.*reusable-claims-policy\\.ya?ml@([^[:space:]\"'#]+).*/\\1/" | sort -u || true)"
+          # The pins are read by parsing the caller's workflow files as YAML, not by matching
+          # lines: block, flow (`claims: { uses: ... }`), quoted and anchored spellings are all the
+          # same job key, and a `uses:` that only appears inside a `run:` string is not a pin.
+          py=python3
+          if ! "$py" -I -c 'import yaml' 2>/dev/null; then
+            venv="${RUNNER_TEMP:-/tmp}/claims-guard-venv"
+            if ! "$py" -m venv "$venv" || ! "$venv/bin/python" -m pip install --quiet --disable-pip-version-check pyyaml; then
+              echo "::error::cannot parse the caller's workflows: python3 has no PyYAML and installing it failed. The pin check fails closed rather than skipping."
+              exit 1
+            fi
+            py="$venv/bin/python"
           fi
-          if [[ -z "$pins" ]]; then
-            echo "::notice::no 'uses: rylee-bee-labs/ci-harness/...reusable-claims-policy.yml@<ref>' line in this repository's workflows, so policy-revision ($rev) cannot be cross-checked (expected when the template is called by a local path, as ci-harness's own self-smoke does)"
-            exit 0
-          fi
-          if grep -qxF "$rev" <<<"$pins"; then
-            echo "uses: pin and policy-revision agree: $rev"
-            exit 0
-          fi
-          echo "::error::policy-revision is not the SHA this repository pins reusable-claims-policy.yml at"
-          {
-            echo "policy-revision : $rev"
-            echo "uses: pin(s)    :"
-            while IFS= read -r pin; do echo "  $pin"; done <<<"$pins"
-            echo ""
-            echo "Set policy-revision to the same 40-character SHA as the uses: line (or the other way round)."
-            echo "A re-pin has to move both; a policy fetched at a different commit than the template is not"
-            echo "the policy the caller thinks it adopted."
-          } >&2
-          exit 1
+          "$py" -I - <<'PY'
+          import os, re, sys
+          from pathlib import Path
+
+          import yaml
+
+          class Plain(yaml.SafeLoader):
+              """Every plain scalar stays a string: a 40-digit SHA must not become an int."""
+
+          Plain.yaml_implicit_resolvers = {}
+
+          rev = os.environ["POLICY_REVISION"]
+          pin_re = re.compile(r"^rylee-bee-labs/ci-harness/\.github/workflows/reusable-claims-policy\.ya?ml@(\S+)$")
+          root = Path(os.environ["GITHUB_WORKSPACE"]) / ".github" / "workflows"
+          calls = []  # (file, job, uses sha/ref, literal policy-revision or None)
+          for path in sorted([*root.glob("*.yml"), *root.glob("*.yaml")]):
+              try:
+                  doc = yaml.load(path.read_text(encoding="utf-8"), Loader=Plain)
+              except (yaml.YAMLError, UnicodeDecodeError) as exc:
+                  print(f"::error::cannot read {path.name} as YAML, so its pins cannot be checked: {exc}")
+                  sys.exit(1)
+              jobs = doc.get("jobs") if isinstance(doc, dict) else None
+              for job, body in (jobs.items() if isinstance(jobs, dict) else []):
+                  uses = body.get("uses") if isinstance(body, dict) else None
+                  m = pin_re.match(uses.strip()) if isinstance(uses, str) else None
+                  if not m:
+                      continue
+                  given = (body.get("with") or {}).get("policy-revision") if isinstance(body.get("with"), dict) else None
+                  calls.append((path.name, str(job), m.group(1), given.strip() if isinstance(given, str) else None))
+
+          if not calls:
+              print(f"::notice::no 'uses: rylee-bee-labs/ci-harness/...reusable-claims-policy.yml@<ref>' job in this repository's workflows, so policy-revision ({rev}) cannot be cross-checked (expected when the template is called by a local path, as ci-harness's own self-smoke does)")
+              sys.exit(0)
+
+          # Judge each call against its own input: every call that hands this revision to the template must
+          # also pin the template at it, so a drifted caller cannot hide behind a second caller's matching pin.
+          # A call whose input is an expression cannot be compared; it counts through the pin check below.
+          own = [c for c in calls if c[3] == rev]
+          bad = [c for c in own if c[2] != rev]
+          if own and not bad:
+              print(f"uses: pin and policy-revision agree: {rev}")
+              sys.exit(0)
+          if not own and any(c[2] == rev for c in calls):
+              print(f"uses: pin and policy-revision agree: {rev}")
+              sys.exit(0)
+
+          print("::error::policy-revision is not the SHA this repository pins reusable-claims-policy.yml at")
+          err = sys.stderr
+          print(f"policy-revision : {rev}", file=err)
+          print("calls (file: job, uses pin, policy-revision):", file=err)
+          for f, j, pin, given in calls:
+              print(f"  {f}: {j}  uses@{pin}  policy-revision={given if given is not None else '(not a literal)'}", file=err)
+          print("", file=err)
+          print("Set policy-revision to the same 40-character SHA as the uses: line (or the other way round).", file=err)
+          print("A re-pin has to move both; a policy fetched at a different commit than the template is not", file=err)
+          print("the policy the caller thinks it adopted.", file=err)
+          sys.exit(1)
+          PY
 
       - name: Fetch the canonical policy at that revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -317,7 +364,8 @@ jobs:
         shell: bash
         env:
           # Read-only, and only to re-read the PR body (see the pr-body arm). It adds no permission:
-          # the template still declares only `contents: read`, so callers need not change anything.
+          # the token is the caller's, unchanged. A caller that grants `pull-requests: read` gets the
+          # current body; one that grants only `contents: read` keeps the event payload, with a warning.
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail

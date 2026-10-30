@@ -564,6 +564,12 @@ jobs:
   # the canary before trusting a verdict.
   claims-policy:
     name: claims policy template
+    # The template declares no permissions of its own, so this grant is what reaches its token:
+    # on a pull_request the gate re-reads the current PR body through the API instead of
+    # falling back to the event payload.
+    permissions:
+      contents: read
+      pull-requests: read
     uses: ./.github/workflows/reusable-claims-policy.yml
     with:
       # A local `./` reference means the policy under test lives in this very

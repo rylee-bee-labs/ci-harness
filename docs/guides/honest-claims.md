@@ -35,8 +35,11 @@ $ pytest tests/ -q
 
 ## After you edit a PR body: re-run the gate
 
-The gate reads the PR body from the GitHub API each time the job runs
-(ci-harness#61). So:
+When the job's token may read pull requests (the calling job grants
+`pull-requests: read`, see below), the gate reads the PR body from the GitHub
+API each time it runs (ci-harness#61). A caller that grants only
+`contents: read` is judged on the body its event captured, with a warning in
+the log. For a caller that grants the read:
 
 1. Edit the body to add the command and its output.
 2. Open the failed **honest-claims policy** job and choose **Re-run failed
@@ -66,12 +69,17 @@ jobs:
       policy-revision: <the same sha>
 ```
 
-Until then, pushing a commit re-judges the body, as before.
+Until then, pushing a commit re-judges the body, as before. The template
+declares no `permissions:` of its own, so keep the caller's default token
+narrow: set `permissions: contents: read` on the workflow and add
+`pull-requests: read` only on the claims job.
 
 ## `policy-revision` must equal the `uses:` SHA
 
 The template fetches the policy at the revision in `policy-revision`, and no
 context property exposes the template's own ref, so the caller writes the SHA
-twice. Before it fetches anything, the job reads the caller's workflow files
-and fails if `policy-revision` is not a SHA the repository pins this template
-at (ci-harness#51). A re-pin changes both lines in one commit.
+twice. Before it fetches anything, the job parses the caller's workflow files
+as YAML (any spelling of the job's `uses:` key counts, flow mappings and quoted
+values included) and fails if a call handing it this `policy-revision` pins
+the template at a different SHA, or if no job pins the template at it
+(ci-harness#51). A re-pin changes both lines in one commit.

@@ -914,7 +914,9 @@ class ClaimsTemplateTest(unittest.TestCase):
         (root / ".github" / "workflows").mkdir(parents=True)
         for name, body in workflows.items():
             (root / ".github" / "workflows" / name).write_text(body)
-        env = {"PATH": "/usr/bin:/bin", "GITHUB_WORKSPACE": str(root), "POLICY_REVISION": revision}
+        (root / "tmp").mkdir()
+        env = {"PATH": "/usr/bin:/bin", "GITHUB_WORKSPACE": str(root), "POLICY_REVISION": revision,
+               "RUNNER_TEMP": str(root / "tmp")}
         return subprocess.run(["bash", "-e", "-c", script], env=env, capture_output=True, text=True)
 
     def caller(self, uses_sha: str, revision: str, quote: str = "") -> str:
@@ -950,6 +952,54 @@ class ClaimsTemplateTest(unittest.TestCase):
         run = self.run_guard({"a.yml": self.caller(self.sha_new, self.sha_new),
                               "b.yml": self.caller(self.sha_old, self.sha_old)}, self.sha_new)
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+
+    def test_a_drifted_caller_cannot_hide_behind_a_second_callers_matching_pin(self) -> None:
+        """a.yml re-pinned `uses:` and left its input on the old SHA; b.yml legitimately pins the old SHA.
+        The run that hands the old SHA to the template must still fail, naming a.yml."""
+        run = self.run_guard({"a.yml": self.caller(self.sha_new, self.sha_old),
+                              "b.yml": self.caller(self.sha_old, self.sha_old)}, self.sha_old)
+        self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+        self.assertIn("a.yml", run.stderr)
+
+    # The caller spellings a line regex missed (the review of this PR): the parse sees the same job key.
+
+    def test_a_flow_mapping_job_is_read(self) -> None:
+        text = (f"jobs:\n  claims: {{ uses: {self.uses}{self.sha_new}, "
+                f"with: {{ policy-revision: {self.sha_old} }} }}\n")
+        run = self.run_guard({"ci.yml": text}, self.sha_old)
+        self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+        self.assertIn(self.sha_new, run.stderr)
+
+    def test_a_flow_mapping_job_that_agrees_passes(self) -> None:
+        text = (f"jobs:\n  claims: {{ uses: {self.uses}{self.sha_new}, "
+                f"with: {{ policy-revision: {self.sha_new} }} }}\n")
+        run = self.run_guard({"ci.yml": text}, self.sha_new)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn("agree", run.stdout)
+
+    def test_uses_after_other_keys_and_with_a_trailing_comment_is_read(self) -> None:
+        text = (f"jobs:\n  claims:\n    name: claims  # not first\n    permissions: {{contents: read}}\n"
+                f"    uses: '{self.uses}{self.sha_new}'  # pinned\n    with:\n      policy-revision: '{self.sha_old}'\n")
+        run = self.run_guard({"ci.yml": text}, self.sha_old)
+        self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+
+    def test_a_uses_text_inside_a_run_block_is_not_a_pin(self) -> None:
+        """Only a job's own `uses:` key is a pin; the same text in a shell script is just text."""
+        text = (f"jobs:\n  note:\n    runs-on: ubuntu-latest\n    steps:\n      - run: |\n"
+                f"          echo uses: {self.uses}{self.sha_old}\n"
+                f"  claims:\n    uses: {self.uses}{self.sha_new}\n    with:\n      policy-revision: {self.sha_new}\n")
+        run = self.run_guard({"ci.yml": text}, self.sha_new)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+
+    def test_an_all_digit_sha_is_still_a_string(self) -> None:
+        digits = "1234567890123456789012345678901234567890"
+        run = self.run_guard({"ci.yml": self.caller(digits, digits)}, digits)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+
+    def test_an_unparseable_workflow_fails_closed_instead_of_hiding_a_pin(self) -> None:
+        run = self.run_guard({"broken.yml": "jobs: [unclosed\n  claims: {\n"}, self.sha_new)
+        self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+        self.assertIn("broken.yml", run.stdout + run.stderr)
 
     def test_a_comment_mentioning_another_sha_is_ignored(self) -> None:
         text = f"# was {self.uses}{self.sha_old}\n" + self.caller(self.sha_new, self.sha_new)
@@ -1036,10 +1086,12 @@ class ClaimsTemplateTest(unittest.TestCase):
     def test_a_body_edited_to_remove_the_evidence_is_judged_as_it_now_reads(self) -> None:
         """Re-reading must not let an old, better body stand in for the current one."""
         run, fed = self.run_gate("30 tests pass\n$ pytest\n30 passed", (200, json.dumps({"body": "30 tests pass"})))
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
         self.assertEqual(self.fed_text(fed), "30 tests pass")
 
     def test_an_emptied_body_is_judged_as_empty(self) -> None:
         run, fed = self.run_gate("30 tests pass", (200, json.dumps({"body": None})))
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
         self.assertEqual(self.fed_text(fed), "")
 
     def test_unreadable_api_falls_back_to_the_payload_and_warns(self) -> None:
@@ -1070,12 +1122,15 @@ class ClaimsTemplateTest(unittest.TestCase):
         run, fed = self.run_gate("ignored", (200, json.dumps({"body": "ignored"})), event="push")
         self.assertEqual(self.calls, [])
 
-    def test_the_read_needs_no_permission_the_template_does_not_already_hold(self) -> None:
-        """A called workflow cannot be granted more than its caller gives it. Declaring `pull-requests: read`
-        here would make GitHub refuse every caller that only grants `contents: read`, so it must not appear."""
-        perms = re.search(r"^permissions:\n((?:  .*\n)+)", self.template, re.M)
-        self.assertIsNotNone(perms)
-        self.assertEqual(perms.group(1).strip(), "contents: read")
+    def test_the_template_declares_no_permissions_so_the_callers_grant_flows_down(self) -> None:
+        """A called workflow keeps or downgrades the caller's token, never raises it. A top-level
+        `permissions: contents: read` would cap the job and drop the `pull-requests: read` a caller grants
+        for the body read; a job-level `pull-requests: read` would make GitHub refuse every caller that only
+        grants `contents: read`. The repo precedent (reusable-node, reusable-uat) declares neither."""
+        self.assertNotRegex(self.template, r"(?m)^permissions:")
+        self.assertNotRegex(self.template, r"(?m)^    permissions:")
+        for name in ("reusable-node.yml", "reusable-uat.yml"):
+            self.assertNotRegex(read(name), r"(?m)^permissions:", name)
 
     @unittest.skipUnless(shutil.which("conftest"), "conftest is not installed; the verdict half is checked in self-smoke")
     def test_verdicts_follow_the_current_body(self) -> None:
