@@ -18,7 +18,9 @@
 #
 # Evidence is a non-placeholder command followed by a non-placeholder
 # observed-output line. Commands may follow "Verify by running:" or
-# begin with "$ ", matching the PR template shape.
+# begin with "$ ", matching the PR template shape. A command line ending in
+# a backslash continues onto the next line; the output is the first flush-left
+# line after the command (see the evidence block below and policy/claims.rego).
 #
 # Patterns MUST match policy/claims.rego. If you change one, change
 # both. The rego is the source of truth for the PR-time CI check; this
@@ -91,61 +93,45 @@ if printf '%s' "$text" | grep -Eiq "$soft_re"; then
 fi
 
 has_evidence=0
+# Evidence, line by line, the way policy/claims.rego reads it (ci-harness#61):
+#   * a command is a "$ " line, a "Verify by running: <cmd>" line, or the line
+#     after a bare "Verify by running:";
+#   * a command line that ends in a backslash continues onto the next physical
+#     line, whatever it holds, and so on while each line ends in one;
+#   * the observed output is the first line AFTER the command and must start
+#     flush left with something other than a placeholder (< # $ or a backtick).
+#     An indented line is a continuation or noise, never the output.
+# Every line is tried as a possible start, like the regexes: another command
+# between a command and its output does not hide the second command.
 if printf '%s\n' "$text" | awk '
-  function trim(s) {
-    sub(/^[[:space:]]+/, "", s)
-    sub(/[[:space:]]+$/, "", s)
-    return s
+  function ok_first(s) {
+    return s != "" && s !~ /^[[:blank:]<#$`]/
   }
-  function usable(s) {
-    s = trim(s)
-    return s != "" && s !~ /^[<#$`]/
-  }
-  function command(s) {
-    s = trim(s)
-    sub(/^[$][[:space:]]+/, "", s)
-    return usable(s)
-  }
-  BEGIN { want_command = 0; want_output = 0; found = 0 }
-  {
-    line = $0
-    sub(/\r$/, "", line)
-
-    if (want_output && usable(line)) {
-      found = 1
-      exit
-    }
-    if (want_output) {
-      want_output = 0
-      next
-    }
-
-    if (want_command) {
-      if (command(line)) {
-        want_command = 0
-        want_output = 1
-      } else {
-        want_command = 0
+  { sub(/\r$/, ""); L[NR] = $0 }
+  END {
+    found = 0
+    for (i = 1; i <= NR && !found; i++) {
+      s = L[i]
+      k = 0
+      if (s ~ /^[$][[:blank:]]+/) {
+        sub(/^[$][[:blank:]]+/, "", s)
+        if (ok_first(s)) k = i
+      } else if (s ~ /^Verify by running:/) {
+        rest = s
+        sub(/^Verify by running:/, "", rest)
+        if (rest ~ /^[[:blank:]]+[^[:blank:]]/) {
+          sub(/^[[:blank:]]+/, "", rest)
+          if (ok_first(rest)) k = i
+        } else if (rest ~ /^[[:blank:]]*$/) {
+          if (i < NR && ok_first(L[i + 1])) k = i + 1
+        }
       }
-      next
+      if (k == 0) continue
+      while (k <= NR && L[k] ~ /\\$/) k++
+      if (k < NR && ok_first(L[k + 1])) found = 1
     }
-
-    if (line ~ /^[$][[:space:]]+/ && command(line)) {
-      want_output = 1
-      next
-    }
-
-    if (line ~ /^Verify by running:/) {
-      rest = line
-      sub(/^Verify by running:[[:space:]]*/, "", rest)
-      if (command(rest)) {
-        want_output = 1
-      } else {
-        want_command = 1
-      }
-    }
+    exit(found ? 0 : 1)
   }
-  END { exit(found ? 0 : 1) }
 '; then
   has_evidence=1
 fi

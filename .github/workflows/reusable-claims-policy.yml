@@ -25,10 +25,17 @@ name: reusable-claims-policy
 # be the right property if it existed; actionlint 1.7.12's schema does not list it
 # and the docs page did not confirm it, so this template does not rely on it.
 #
-# The consequence is a duplicated SHA, so the checkout is VERIFIED after the
-# fact: the job asserts the fetched tree really is the requested commit and
-# prints it. A caller who bumps `uses:` but forgets the input gets a stale
-# policy and a log line that says which SHA actually ran.
+# The consequence is a duplicated SHA, so it is checked twice. Before the fetch,
+# the job reads the caller's own workflow files and fails if the `policy-revision`
+# it was handed is not one the caller pins in a `uses:` line (ci-harness#51: a
+# re-pin moved `uses:` and left the input behind, in every caller, silently).
+# After the fetch, the checkout is VERIFIED: the job asserts the fetched tree
+# really is the requested commit and prints it.
+#
+# The PR body is read from the API at run time, not from the event payload
+# (ci-harness#61): a payload is frozen when the event fires, so an edited body
+# and a re-run of a failed job both judged the OLD text. A caller that does not
+# grant the read keeps the payload, with a warning that says how to fix it.
 #
 # Canary before use: conftest reports a POLICY THAT FAILS TO COMPILE with exit
 # 1, which is indistinguishable from a policy denial. If claims.rego is broken,
@@ -182,6 +189,47 @@ jobs:
           echo "ref=$rev" >> "$GITHUB_OUTPUT"
           echo "requested ci-harness revision: $rev"
 
+      # The input is a second copy of the SHA in the caller's `uses:` line, and nothing else
+      # compared them. A routine re-pin moved `uses:` and left the input on the old commit, so
+      # the policy that gated the PR was not the one the caller thought it had adopted. The
+      # caller's workflows are already on disk (the checkout above), so read the pin from
+      # there: the input must be one of the SHAs this repository pins this template at.
+      # Not reading it from the context is deliberate: see the header, no property exposes a
+      # reusable workflow's own ref. This runs before the fetch so a wrong input is named
+      # here, in plain words, rather than as a checkout that fails or fetches the wrong tree.
+      - name: Check the caller's pin matches policy-revision
+        shell: bash
+        run: |
+          set -euo pipefail
+          rev="$POLICY_REVISION"
+          shopt -s nullglob
+          files=("$GITHUB_WORKSPACE"/.github/workflows/*.yml "$GITHUB_WORKSPACE"/.github/workflows/*.yaml)
+          pins=""
+          if [[ ${#files[@]} -gt 0 ]]; then
+            # Only live `uses:` lines (a comment that quotes an old SHA is not a pin), quoted or not.
+            pins="$(grep -hE "^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]*[\"']?rylee-bee-labs/ci-harness/\\.github/workflows/reusable-claims-policy\\.ya?ml@" "${files[@]}" \
+              | sed -E "s/.*reusable-claims-policy\\.ya?ml@([^[:space:]\"'#]+).*/\\1/" | sort -u || true)"
+          fi
+          if [[ -z "$pins" ]]; then
+            echo "::notice::no 'uses: rylee-bee-labs/ci-harness/...reusable-claims-policy.yml@<ref>' line in this repository's workflows, so policy-revision ($rev) cannot be cross-checked (expected when the template is called by a local path, as ci-harness's own self-smoke does)"
+            exit 0
+          fi
+          if grep -qxF "$rev" <<<"$pins"; then
+            echo "uses: pin and policy-revision agree: $rev"
+            exit 0
+          fi
+          echo "::error::policy-revision is not the SHA this repository pins reusable-claims-policy.yml at"
+          {
+            echo "policy-revision : $rev"
+            echo "uses: pin(s)    :"
+            while IFS= read -r pin; do echo "  $pin"; done <<<"$pins"
+            echo ""
+            echo "Set policy-revision to the same 40-character SHA as the uses: line (or the other way round)."
+            echo "A re-pin has to move both; a policy fetched at a different commit than the template is not"
+            echo "the policy the caller thinks it adopted."
+          } >&2
+          exit 1
+
       - name: Fetch the canonical policy at that revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -267,6 +315,10 @@ jobs:
 
       - name: Honest claims gate
         shell: bash
+        env:
+          # Read-only, and only to re-read the PR body (see the pr-body arm). It adds no permission:
+          # the template still declares only `contents: read`, so callers need not change anything.
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
 
@@ -291,7 +343,28 @@ jobs:
                 echo "ERROR: event payload has no .pull_request — cannot check the body" >&2
                 exit 1
               fi
-              jq -c '{text: (.pull_request.body // "")}' "$GITHUB_EVENT_PATH" > "$RUNNER_TEMP/claim.json"
+              # Judge the body as it reads NOW. The event payload is frozen when the event fires:
+              # an edited body fires no `pull_request` event, and "re-run failed jobs" replays the
+              # original payload, so a gate that reads only the payload judges the old text until
+              # someone pushes a commit (ci-harness#61). Ask GitHub for the current body instead.
+              number="$(jq -r '.pull_request.number // empty' "$GITHUB_EVENT_PATH")"
+              url="${GITHUB_API_URL:-https://api.github.com}/repos/${GITHUB_REPOSITORY:-}/pulls/${number}"
+              current=""
+              # The token goes to curl on stdin, never into argv.
+              if [[ -n "$number" ]] \
+                && current="$(printf 'header = "Authorization: Bearer %s"\n' "${GH_TOKEN:-}" \
+                  | curl -fsS -K - --max-time 20 --retry 2 \
+                    -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28" \
+                    "$url" 2>"$RUNNER_TEMP/body-read.err")" \
+                && jq -e 'type == "object" and has("body")' <<<"$current" >/dev/null 2>&1; then
+                echo "judging PR #$number as it reads now (API read), not the body captured in the event payload"
+                jq -c '{text: (.body // "")}' <<<"$current" > "$RUNNER_TEMP/claim.json"
+              else
+                # Fall back to what the event captured rather than fail every caller that cannot read
+                # it: that is exactly the behaviour before this read existed, and the warning says so.
+                echo "::warning::could not re-read the current body of PR #${number:-?} ($(head -c 200 "$RUNNER_TEMP/body-read.err" 2>/dev/null | tr '\n' ' ')); judging the body captured in the event payload, which is stale after an edit or a re-run. Grant 'pull-requests: read' to this job in the caller's workflow (a called workflow cannot give itself more than its caller grants), or push a commit to re-judge."
+                jq -c '{text: (.pull_request.body // "")}' "$GITHUB_EVENT_PATH" > "$RUNNER_TEMP/claim.json"
+              fi
               ;;
             commit-message)
               if [[ ! -f "$GITHUB_EVENT_PATH" ]]; then
@@ -315,6 +388,7 @@ jobs:
             echo "" >&2
             echo "A strong claim needs a command and its observed output." >&2
             echo "See docs/guides/honest-claims.md in this repo, or the PULL_REQUEST_TEMPLATE." >&2
+            echo "After editing the PR body, re-run the failed job: the gate reads the current body." >&2
           fi
           exit $rc
 

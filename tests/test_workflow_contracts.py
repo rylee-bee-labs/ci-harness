@@ -8,12 +8,15 @@ everywhere else.
 import hashlib
 import json
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
 import textwrap
+import threading
 import time
 import unittest
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 WF = Path(__file__).resolve().parent.parent / ".github" / "workflows"
@@ -886,6 +889,206 @@ class TestmonPruneKeepsSiblingStores(unittest.TestCase):
             subprocess.run(["bash", "-c", "\n".join(lines)], env=env, check=True)
             left = sorted(str(p.relative_to(ref)) for p in ref.rglob("*.testmondata"))
         self.assertEqual(left, ["keyA/new.testmondata", "keyB/theirs.testmondata"])
+
+
+class ClaimsTemplateTest(unittest.TestCase):
+    """reusable-claims-policy: the pin guard (ci-harness#51) and the current-body read (ci-harness#61).
+
+    Each test runs the template's real step script, extracted from the workflow text, in a throwaway
+    directory. The gate steps use a recording stand-in for `conftest`, so what is asserted is WHICH text
+    reached the policy; the verdict tests at the bottom use the real conftest when it is installed.
+    """
+
+    template = read("reusable-claims-policy.yml")
+    sha_old = "a0c82129374ab551cd4dee7efd7b46c04f1be5eb"
+    sha_new = "184a81393a1b26d8ca3d60eed4428cefa8ab1cc2"
+    uses = "rylee-bee-labs/ci-harness/.github/workflows/reusable-claims-policy.yml@"
+
+    # ---- #51: the caller's `uses:` SHA and `policy-revision` must be the same commit ----
+
+    def run_guard(self, workflows: dict[str, str], revision: str) -> subprocess.CompletedProcess:
+        script = step_script(self.template, "Check the caller's pin matches policy-revision")
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        root = Path(d.name)
+        (root / ".github" / "workflows").mkdir(parents=True)
+        for name, body in workflows.items():
+            (root / ".github" / "workflows" / name).write_text(body)
+        env = {"PATH": "/usr/bin:/bin", "GITHUB_WORKSPACE": str(root), "POLICY_REVISION": revision}
+        return subprocess.run(["bash", "-e", "-c", script], env=env, capture_output=True, text=True)
+
+    def caller(self, uses_sha: str, revision: str, quote: str = "") -> str:
+        return (f"jobs:\n  claims:\n    uses: {quote}{self.uses}{uses_sha}{quote}\n"
+                f"    with:\n      policy-revision: {revision}\n")
+
+    def test_uses_ahead_of_policy_revision_fails_and_names_both(self) -> None:
+        """The drift #51 measured: a re-pin moved `uses:` and left the input behind."""
+        run = self.run_guard({"ci.yml": self.caller(self.sha_new, self.sha_old)}, self.sha_old)
+        self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+        self.assertIn(self.sha_new, run.stderr)
+        self.assertIn(self.sha_old, run.stderr)
+
+    def test_policy_revision_ahead_of_uses_fails(self) -> None:
+        run = self.run_guard({"ci.yml": self.caller(self.sha_old, self.sha_new)}, self.sha_new)
+        self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+
+    def test_matching_pin_passes_and_says_so(self) -> None:
+        run = self.run_guard({"ci.yml": self.caller(self.sha_new, self.sha_new)}, self.sha_new)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn(self.sha_new, run.stdout)
+
+    def test_quoted_uses_is_read_too(self) -> None:
+        run = self.run_guard({"ci.yml": self.caller(self.sha_new, self.sha_old, quote='"')}, self.sha_old)
+        self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+
+    def test_a_branch_ref_is_not_the_revision(self) -> None:
+        run = self.run_guard({"ci.yml": self.caller("main", self.sha_new)}, self.sha_new)
+        self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+
+    def test_a_second_caller_pinned_elsewhere_does_not_block_a_matching_one(self) -> None:
+        """Two workflows may be mid-migration; each call is judged against its own input."""
+        run = self.run_guard({"a.yml": self.caller(self.sha_new, self.sha_new),
+                              "b.yml": self.caller(self.sha_old, self.sha_old)}, self.sha_new)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+
+    def test_a_comment_mentioning_another_sha_is_ignored(self) -> None:
+        text = f"# was {self.uses}{self.sha_old}\n" + self.caller(self.sha_new, self.sha_new)
+        run = self.run_guard({"ci.yml": text}, self.sha_new)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+
+    def test_a_local_call_has_no_sha_to_compare_and_says_so(self) -> None:
+        """ci-harness's own self-smoke calls `./.github/...`; the guard must not break it."""
+        local = "jobs:\n  claims:\n    uses: ./.github/workflows/reusable-claims-policy.yml\n"
+        run = self.run_guard({"self-smoke.yml": local}, self.sha_new)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn("::notice::", run.stdout)
+
+    def test_the_guard_runs_before_the_policy_is_fetched(self) -> None:
+        """A wrong input must be named before the checkout of that revision can fail confusingly."""
+        names = re.findall(r"^      - name: (.*)$", self.template, re.M)
+        guard = names.index("Check the caller's pin matches policy-revision")
+        self.assertLess(guard, names.index("Fetch the canonical policy at that revision"))
+
+    # ---- #61: judge the PR body as it is now, not as the event captured it ----
+
+    def run_gate(self, payload_body: str | None, api: tuple[int, str] | None, *, real_conftest: bool = False,
+                 event: str = "pull_request") -> tuple[subprocess.CompletedProcess, Path]:
+        """Run the `Honest claims gate` step. `api` is the (status, body) the PR endpoint answers, or None for
+        an endpoint nobody listens on. Returns the process and the file the policy was fed (stand-in only)."""
+        script = step_script(self.template, "Honest claims gate")
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        root = Path(d.name)
+        (root / "bin").mkdir()
+        (root / "tmp").mkdir()
+        fed = root / "fed.json"
+        (root / "bin" / "conftest").write_text(f'#!/bin/bash\ncat > "{fed}"\nexit 0\n')
+        (root / "bin" / "conftest").chmod(0o755)
+        payload = {"pull_request": {"number": 7}}
+        if payload_body is not None:
+            payload["pull_request"]["body"] = payload_body
+        (root / "event.json").write_text(json.dumps(payload))
+
+        calls: list[str] = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:  # noqa: N802 - http.server API
+                calls.append(self.path)
+                status, text = api or (404, "{}")
+                data = text.encode()
+                self.send_response(status)
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def log_message(self, *args: object) -> None:
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        port = server.server_address[1] if api is not None else 9  # discard port: connection refused
+        path = f"{root / 'bin'}:/usr/bin:/bin"
+        if real_conftest:
+            path = f"{Path(shutil.which('conftest')).parent}:/usr/bin:/bin"
+        env = {"PATH": path, "RUNNER_TEMP": str(root / "tmp"), "GITHUB_EVENT_NAME": event,
+               "GITHUB_EVENT_PATH": str(root / "event.json"), "GITHUB_REPOSITORY": "o/r",
+               "GITHUB_API_URL": f"http://127.0.0.1:{port}", "GH_TOKEN": "t", "CHECK": "auto", "HOME": str(root),
+               "HARNESS_SRC": str(Path(__file__).resolve().parent.parent)}
+        run = subprocess.run(["bash", "-e", "-c", script], env=env, capture_output=True, text=True)
+        self.calls = calls
+        return run, fed
+
+    def fed_text(self, fed: Path) -> str:
+        return json.loads(fed.read_text())["text"]
+
+    def test_edited_body_is_judged_not_the_event_payload(self) -> None:
+        """The #61 failure: evidence added after the event was captured. Re-running the job replays the
+        payload, so the template has to ask GitHub for the body as it is now."""
+        edited = "30 tests pass\n$ pytest tests/\n30 passed"
+        run, fed = self.run_gate("30 tests pass", (200, json.dumps({"body": edited})))
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertEqual(self.fed_text(fed), edited)
+        self.assertEqual(self.calls, ["/repos/o/r/pulls/7"])
+
+    def test_a_body_edited_to_remove_the_evidence_is_judged_as_it_now_reads(self) -> None:
+        """Re-reading must not let an old, better body stand in for the current one."""
+        run, fed = self.run_gate("30 tests pass\n$ pytest\n30 passed", (200, json.dumps({"body": "30 tests pass"})))
+        self.assertEqual(self.fed_text(fed), "30 tests pass")
+
+    def test_an_emptied_body_is_judged_as_empty(self) -> None:
+        run, fed = self.run_gate("30 tests pass", (200, json.dumps({"body": None})))
+        self.assertEqual(self.fed_text(fed), "")
+
+    def test_unreadable_api_falls_back_to_the_payload_and_warns(self) -> None:
+        """Least-privilege callers may not grant the read; they keep today's behaviour, loudly."""
+        for api in ((403, '{"message":"Resource not accessible by integration"}'), (200, "not json"),
+                    (200, '{"no":"body"}'), None):
+            with self.subTest(api=api):
+                run, fed = self.run_gate("30 tests pass", api)
+                self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+                self.assertEqual(self.fed_text(fed), "30 tests pass")
+                self.assertIn("::warning::", run.stdout + run.stderr)
+                self.assertIn("pull-requests: read", run.stdout + run.stderr)
+
+    def test_payload_without_pull_request_still_fails_closed(self) -> None:
+        script = step_script(self.template, "Honest claims gate")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "event.json").write_text("{}")
+            env = {"PATH": "/usr/bin:/bin", "RUNNER_TEMP": tmp, "GITHUB_EVENT_NAME": "pull_request",
+                   "GITHUB_EVENT_PATH": str(root / "event.json"), "CHECK": "auto", "HARNESS_SRC": tmp}
+            run = subprocess.run(["bash", "-e", "-c", script], env=env, capture_output=True, text=True)
+        self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+        self.assertIn("no .pull_request", run.stderr)
+
+    def test_commit_message_mode_never_calls_the_api(self) -> None:
+        script = step_script(self.template, "Honest claims gate")
+        self.assertRegex(script, r"commit-message\)")
+        run, fed = self.run_gate("ignored", (200, json.dumps({"body": "ignored"})), event="push")
+        self.assertEqual(self.calls, [])
+
+    def test_the_read_needs_no_permission_the_template_does_not_already_hold(self) -> None:
+        """A called workflow cannot be granted more than its caller gives it. Declaring `pull-requests: read`
+        here would make GitHub refuse every caller that only grants `contents: read`, so it must not appear."""
+        perms = re.search(r"^permissions:\n((?:  .*\n)+)", self.template, re.M)
+        self.assertIsNotNone(perms)
+        self.assertEqual(perms.group(1).strip(), "contents: read")
+
+    @unittest.skipUnless(shutil.which("conftest"), "conftest is not installed; the verdict half is checked in self-smoke")
+    def test_verdicts_follow_the_current_body(self) -> None:
+        cases = {
+            "no evidence": ("30 tests pass", "30 tests pass", 1),
+            "genuine evidence": ("30 tests pass", "30 tests pass\n$ pytest tests/\n30 passed", 0),
+            "evidence removed by an edit": ("30 tests pass\n$ pytest\n30 passed", "30 tests pass", 1),
+            "no claim at all": ("", "fix: typo", 0),
+        }
+        for name, (stale, current, want) in cases.items():
+            with self.subTest(name):
+                run, _ = self.run_gate(stale, (200, json.dumps({"body": current})), real_conftest=True)
+                self.assertEqual(run.returncode, want, run.stdout + run.stderr)
 
 
 if __name__ == "__main__":

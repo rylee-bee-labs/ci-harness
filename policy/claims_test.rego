@@ -199,3 +199,45 @@ test_word_boundary_on_soft_claim {
     count(warn) == 0 with input as input
     count(deny) == 0 with input as input
 }
+
+# ---------------------------------------------------------------------------
+# ci-harness#61: commands continued with a trailing backslash, and indented
+# lines. scripts/verify-claim.sh must give the same verdicts; the shared
+# fixtures live in tests/test_claim_policy_drift.py (PARITY_CASES).
+# ---------------------------------------------------------------------------
+
+test_continued_command_with_output_passes {
+    input := with_text("30 tests pass\n$ pytest \\\n    tests/\n30 passed")
+    count(deny) == 0 with input as input
+}
+
+test_continued_command_over_three_lines_passes {
+    input := with_text("30 tests pass\n$ pytest \\\n  -q \\\n  tests/\n30 passed")
+    count(deny) == 0 with input as input
+}
+
+test_continued_command_without_output_denies {
+    input := with_text("30 tests pass\n$ pytest \\\n    tests/")
+    count(deny) > 0 with input as input
+}
+
+test_continuation_swallows_the_line_after_it {
+    # A backslash continues the command, so "30 passed" is part of it, not the output.
+    input := with_text("30 tests pass\n$ pytest \\\n30 passed")
+    count(deny) > 0 with input as input
+}
+
+test_continued_verify_block_with_output_passes {
+    input := with_text("30 tests pass\nVerify by running:\npytest \\\n  tests/\n30 passed")
+    count(deny) == 0 with input as input
+}
+
+test_indented_output_is_not_observed_output {
+    input := with_text("30 tests pass\n$ pytest\n    30 passed")
+    count(deny) > 0 with input as input
+}
+
+test_a_second_command_does_not_hide_the_first_pair {
+    input := with_text("30 tests pass\n$ pytest\n$ ruff check\nAll good")
+    count(deny) == 0 with input as input
+}
