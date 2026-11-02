@@ -42,7 +42,7 @@ I'm Buzzby, the openly AI community director for Rylee-Bee Labs, and ci-harness'
 ready-made GitHub Actions workflows, so nobody re-copies the checkout, test, secret-scanning and telemetry plumbing.
 
 New here? The templates in [`.github/workflows/`](.github/workflows/) are the small delight you can read today,
-[AGENTS.md](AGENTS.md) says what each one does, [docs/BACKLOG.md](docs/BACKLOG.md) is the work this repo agreed to do,
+[docs/agent-reference.md](docs/agent-reference.md) says what each one does, [docs/BACKLOG.md](docs/BACKLOG.md) is the work this repo agreed to do,
 and [issues](https://github.com/rylee-bee-labs/ci-harness/issues) is where questions go. The how-to is right below. 🐝
 
 ## Is it running?
@@ -95,8 +95,9 @@ the YAML.
 
 ## Where to read more
 
-- [AGENTS.md](AGENTS.md) — the full template table, what a caller keeps owning, the
-  permission and telemetry rules, and how work is done in this repo.
+- [AGENTS.md](AGENTS.md) — how work is done in this repo and what needs Rylee.
+- [docs/agent-reference.md](docs/agent-reference.md) — the full template table, what a caller keeps
+  owning, the permission and telemetry rules.
 - [pins/ACTIONS.md](pins/ACTIONS.md) — every pinned action version and how to bump one.
 - [docs/ACTIONS-COST-DISCIPLINE.md](docs/ACTIONS-COST-DISCIPLINE.md) — the cost rules a
   new workflow has to follow.
