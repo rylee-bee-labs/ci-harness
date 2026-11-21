@@ -17,7 +17,7 @@ schema: play-nice/adoption-v1
 project: ci-harness-fixture-current
 source:
   repository: rylee-bee-labs/play-nice-contracts
-  revision: 2c5a6e40ad461f31b3a43ff61df553aa20fd29da   # re-pinned 2026-10-30 by Claude after reading a9c4197..2c5a6e4 (Play-Nice 2.2.0): the only contracts/ change is a new README.md in seven contract folders, schema/ is unchanged; the fixture only exercises the freshness gate.
+  revision: c7b19a433507a800182718a0c41b3868c9e549ef   # re-pinned 2026-11-21 by Claude (Rylee OK via picker) after reading 2c5a6e4..c7b19a4: FLOOR 1.0.0 -> 1.1.0 (rule 6: a recorded standing decision counts as asking, inside its scope; merged by Rylee, play-nice-contracts#111), CONTRACT_PROOF 2.0.3 example line, docs and CODEOWNERS trims; schema/ unchanged. Nothing lowers the floor.
 freshness:
   policy: require-current
   ref: main

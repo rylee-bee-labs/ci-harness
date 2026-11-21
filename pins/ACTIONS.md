@@ -33,7 +33,7 @@ upstream tag on the pin date (never copied blindly from an older workflow).
 | Thing | Pin | Where it lives | Rationale |
 |---|---|---|---|
 | uv | 0.11.28 | `uv-version` input default in reusable-python.yml / reusable-node.yml | matches the version adopted repos already ran; bumped only via this table |
-| CPython default | 3.12 | `python-version` input default | estate-wide test interpreter |
+| CPython default | 3.15 | `python-version` input default | estate-wide test interpreter |
 | Node default | 22 | `node-version` input default | matches personal-world e2e |
 | nginx (fixture only) | 1.30.1-alpine | fixtures/container-demo/Dockerfile | pinned-tag exemplar: consuming repos pin their own base images |
 | play-nice-contracts clone | **deliberately unpinned** — default-branch tip, `git clone --filter=blob:none` over https (full history, so ancestry is provable) | reusable-contract-freshness.yml | the cloned checkout's own revision is one of the pins the freshness check compares against the remote head; pinning the clone anywhere but tip would force a non-CURRENT verdict forever. The revision under test is the consumer's manifest pin. Fixture re-pins (current vs stale probe) stay manual, per this repo's own honesty rule |

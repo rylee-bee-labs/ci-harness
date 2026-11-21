@@ -39,7 +39,7 @@ on:
         description: CPython version for the test interpreter.
         type: string
         required: false
-        default: "3.12"
+        default: "3.15"
       uv-version:
         description: Exact uv version bootstrapped via pip.
         type: string
