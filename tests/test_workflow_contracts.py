@@ -1165,3 +1165,43 @@ def test_self_smoke_accepts_every_mode_the_python_template_can_select():
     assert allowed, "found no PYTEST_MODE case in self-smoke"
     missing = modes - set(allowed.group(1).split("|"))
     assert not missing, f"self-smoke rejects modes the template can select: {sorted(missing)}"
+
+
+class SetupBrowserTest(unittest.TestCase):
+    """setup-browser is opt-in: off by default, only in the test job, and every step it adds is guarded.
+
+    studio's render tests drive a Playwright Chromium from node, and studio has no package.json; without
+    this its heavy lane skipped 235 of 239 render tests for "Playwright is not installed" (2026-11-25).
+    """
+
+    text = read("reusable-python.yml")
+
+    def test_inputs_are_optional_and_off_by_default(self) -> None:
+        block = self.text.split("      setup-browser:\n", 1)[1].split("      browser-node-version:", 1)[0]
+        self.assertIn("type: boolean", block)
+        self.assertIn("required: false", block)
+        self.assertIn("default: false", block)
+        self.assertRegex(self.text, r'browser-playwright-version:\n(?:.*\n)*?        default: "\d+\.\d+\.\d+"')
+
+    def test_every_added_step_is_guarded_and_lives_in_the_test_job(self) -> None:
+        jobs = jobs_in(self.text)
+        test_body = "\n".join(jobs["test"])
+        self.assertEqual(test_body.count("inputs.setup-browser"), 2)
+        for line in test_body.splitlines():
+            if "inputs.setup-browser" in line:
+                self.assertIn("inputs.skip-reason == ''", line)
+        for job in ("ruff", "bandit"):
+            self.assertNotIn("setup-browser", "\n".join(jobs.get(job, [])), job)
+
+    def test_install_is_moved_in_whole_and_puts_playwright_on_node_path(self) -> None:
+        step = self.text.split("- name: Install a Playwright Chromium (setup-browser)", 1)[1].split("\n      - ", 1)[0]
+        self.assertIn('mv -T "$tmp" "$prefix"', step)
+        self.assertIn('"${tmp:?}"', step)
+        self.assertIn("NODE_PATH=$prefix/lib/node_modules", step)
+        self.assertIn("install --with-deps chromium", step)  # hosted runners need the system libraries
+
+    def test_self_smoke_launches_the_browser_for_real(self) -> None:
+        smoke = read("self-smoke.yml")
+        job = smoke.split("  python-setup-browser:\n", 1)[1].split("\n  # ", 1)[0]
+        self.assertIn("setup-browser: true", job)
+        self.assertIn("chromium.launch()", job)
