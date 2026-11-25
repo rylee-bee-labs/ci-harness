@@ -130,6 +130,32 @@ on:
         type: string
         required: false
         default: ""
+      setup-browser:
+        description: >-
+          Give the test job Node and a Playwright Chromium, for Python suites that drive a browser
+          through node (studio's render tests, which have no package.json of their own). Off by
+          default: nothing changes for a caller that does not set it. When on, the test job runs
+          actions/setup-node, installs `playwright@browser-playwright-version` once per runner into
+          the runner's tool cache, puts it on NODE_PATH and PATH, and runs `playwright install
+          chromium`. The browser lands in the runner user's Playwright cache, so a revision another
+          repo already fetched installs in seconds. ffmpeg is not installed: the job warns when the
+          runner has none. A caller that only needs it some nights passes an expression, e.g.
+          `github.event_name == 'schedule'`.
+        type: boolean
+        required: false
+        default: false
+      browser-node-version:
+        description: The Node version setup-browser installs.
+        type: string
+        required: false
+        default: "22"
+      browser-playwright-version:
+        description: >-
+          The Playwright version setup-browser installs. Pinned; the default matches project-home's
+          web/ pin, so the two share one cached Chromium on the self-hosted runners.
+        type: string
+        required: false
+        default: "1.65.1"
       enable-ruff:
         description: >-
           Add a separate ruff lint job. ruff must come from the repo's own
@@ -289,6 +315,40 @@ jobs:
       - name: Sync locked dependencies
         if: ${{ inputs.skip-reason == '' }}
         run: uv sync --frozen ${{ inputs.sync-args }}
+      # setup-browser (opt-in): Node plus a Playwright Chromium for suites that drive a browser from node.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        if: ${{ inputs.skip-reason == '' && inputs.setup-browser }}
+        with:
+          node-version: ${{ inputs.browser-node-version }}
+      - name: Install a Playwright Chromium (setup-browser)
+        if: ${{ inputs.skip-reason == '' && inputs.setup-browser }}
+        shell: bash
+        env:
+          PW_VERSION: ${{ inputs.browser-playwright-version }}
+          HOSTED: ${{ runner.environment == 'github-hosted' }}
+        run: |
+          set -euo pipefail
+          # One install per runner and version, kept in the tool cache. It is built aside and moved in
+          # whole, so a cancelled job never leaves a half-installed folder that later runs would trust.
+          prefix="${RUNNER_TOOL_CACHE:-$RUNNER_TEMP}/playwright-node/$PW_VERSION"
+          if [ ! -x "$prefix/bin/playwright" ]; then
+            tmp="$prefix.tmp.$$"
+            rm -rf "${tmp:?}"
+            npm install -g --no-audit --no-fund --prefix "$tmp" "playwright@$PW_VERSION"
+            mkdir -p "${prefix%/*}"
+            mv -T "$tmp" "$prefix" 2>/dev/null || rm -rf "${tmp:?}"   # another job won the race: use its copy
+          fi
+          echo "NODE_PATH=$prefix/lib/node_modules" >> "$GITHUB_ENV"
+          echo "$prefix/bin" >> "$GITHUB_PATH"
+          if [ "$HOSTED" = true ]; then
+            "$prefix/bin/playwright" install --with-deps chromium
+          else
+            "$prefix/bin/playwright" install chromium
+          fi
+          echo "setup-browser: node $(node --version), playwright $PW_VERSION from $prefix"
+          if ! command -v ffmpeg > /dev/null || ! command -v ffprobe > /dev/null; then
+            echo "::warning::setup-browser: this runner has no ffmpeg/ffprobe, so tests that also need them will skip"
+          fi
       # Hosted testmon store (pytest-select=affected only): runners are throwaway, so the data goes
       # through actions/cache. A push to the default branch saves it under a key that ends in the
       # commit sha; a pull_request restores only the entry for its merge commit's first parent
